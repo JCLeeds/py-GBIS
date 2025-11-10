@@ -1396,34 +1396,27 @@ if __name__ == "__main__":
             'slip': 2.0,
             'opening': 0.0
         }
-    # # ##################################################################
-
-
-
-
-
-       
+    ##################################################################
+    ############################## EDIT IN YOUR OWN DATA HERE ##############################
     # # Load data from .npy file
-    # # data = np.load('benji_test.npy', allow_pickle=True)
+  
     data = np.load('20230108_20230201.geo.unw_processed.npy', allow_pickle=True)
     data_dict = data.item()
 
-    # sill = 6.1951e-05
-    # range_param = 15737.072
-    # nugget = 3.311e-06
 
     nugget =7.475808e-06
     sill=5.775924e-05
     range_param = 44960.6
-
-    # referencePoint = [-67.83951712, -21.77505660]
-    # use this if data_prep used
+    number_of_iterations = int(1e5)
+    model_type='okada'  # Change to 'pCDM' or 'okada' as needed case insensitive
+    use_simulated_annealing_for_first_guess = True
+    # referencePoint = [-67.83951712, -21.77505660] # add manually if you would like 
+    # use this if step01 was used to generate data 
     referencePoint = [data_dict['center_lat'], data_dict['center_lon']]
     print(f"Using reference point: {referencePoint}")
     ###################################################################
-
-    # Extract data from the loaded object
     
+    # Extract data from the loaded object
     print(data_dict.keys())
     u_los_obs = np.array(data_dict['Phase']).flatten()
 
@@ -1453,7 +1446,7 @@ if __name__ == "__main__":
         Y_obs=Y_obs, 
         incidence_angle=incidence_angle, 
         heading=heading,
-        n_iterations=int(1e4),
+        n_iterations=number_of_iterations,
         sill=sill,
         nugget=nugget,
         range_param=range_param,
@@ -1464,8 +1457,8 @@ if __name__ == "__main__":
         adaptive_interval=1000,
         target_acceptance=0.23,
         figure_folder="figure_test_realdata_1e6",
-        use_sa_init=True,
-        model_type='okada'  # Change to 'pCDM' or 'okada' as needed
+        use_sa_init=use_simulated_annealing_for_first_guess,
+        model_type=model_type  # Change to 'pCDM' or 'okada' as needed
     )
     
   
