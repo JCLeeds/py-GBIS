@@ -397,17 +397,45 @@ def convert_e_n_u_to_inc_heading(e,n,u):
 
 
 def main():
+    """
+    Main function for processing TIF files with adaptive sampling for InSAR data analysis.
+    This function provides a command-line interface for processing interferometric synthetic
+    aperture radar (InSAR) data files. It performs adaptive downsampling based on user-selected
+    regions of interest and converts displacement components to radar geometry.
+    Command-line Arguments:
+        input_file (str): Path to input .tif file containing phase/displacement data
+        input_file_e (str): Path to input .tif file for East component displacement
+        input_file_n (str): Path to input .tif file for North component displacement  
+        input_file_u (str): Path to input .tif file for Up component displacement
+        --high_res_factor (int, optional): Downsampling factor for high-resolution areas (default: 30)
+        --low_res_factor (int, optional): Downsampling factor for low-resolution areas (default: 80)
+        --output (str, optional): Output file prefix. If not provided, uses input filename base
+    Processing Steps:
+        1. Parses command-line arguments and sets default output filename if needed
+        2. Launches interactive selection tool for user to choose center coordinates and radius
+        3. Performs adaptive sampling with higher resolution near selected center point
+        4. Converts East/North/Up components to incidence angle and heading for radar geometry
+        5. Displays visualization of downsampled results
+        6. Saves processed data and clipped full-resolution data to .npy files
+    Output Files:
+        - {output}.npy: Downsampled data with coordinates, phase, mask, and radar geometry
+        - {output}_clipped_full_resolution.npy: Full resolution data clipped to region of interest
+    Returns:
+        None: Function exits early if no interactive selection is made
+    Example:
+        python script.py phase.tif east.tif north.tif up.tif --high_res_factor 20 --low_res_factor 80 --output processed_data
+    """
+
     parser = argparse.ArgumentParser(description='Process TIF file with adaptive sampling')
     parser.add_argument('input_file', help='Input .tif file path')
     parser.add_argument('input_file_e', help='Input .tif file path for East component')
     parser.add_argument('input_file_n', help='Input .tif file path for North component')
     parser.add_argument('input_file_u', help='Input .tif file path for Up component')
-    # parser.add_argument('--center_lat', type=float, required=True, help='Center latitude')
-    # parser.add_argument('--center_lon', type=float, required=True, help='Center longitude')
-    # parser.add_argument('--radius_km', type=float, default=10.0, help='Radius in km for high-res area')
-    parser.add_argument('--high_res_factor', type=int, default=1, help='High-res downsampling factor')
-    parser.add_argument('--low_res_factor', type=int, default=4, help='Low-res downsampling factor')
+
+    parser.add_argument('--high_res_factor', type=int, default=30, help='High-res downsampling factor')
+    parser.add_argument('--low_res_factor', type=int, default=80, help='Low-res downsampling factor')
     parser.add_argument('--output', help='Output file prefix')
+
     args = parser.parse_args()
 
     # Set default output if not provided

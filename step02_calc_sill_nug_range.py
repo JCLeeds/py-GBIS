@@ -424,15 +424,13 @@ def covairance_calculator(datapath, referencePoint):
 
 
 if __name__ == "__main__":
+
+    ################################## EDIT to YOUR own DATA PATH #############################
     datapath = '20230108_20230201.geo.unw_processed_clipped_full_resolution.npy'
+    ###################################################################
     data = np.load(datapath, allow_pickle=True)
     data_dict = data.item()
     print(data_dict.keys())
     referencePoint = [float(data_dict['center_lat']),float(data_dict['center_lon'])]
     print(referencePoint)
-    # sill = 6.1951e-05
-    # range_param = 15737.072
-    # nugget = 3.311e-06
-    # referencePoint = [-67.83951712, -21.77505660]
-    ###################################################################
     covairance_calculator(datapath,referencePoint)
