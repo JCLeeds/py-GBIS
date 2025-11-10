@@ -33,4 +33,6 @@ The maximum step size is there so that this adaptive step size does not blow up 
 <img width="1501" height="599" alt="Screenshot from 2025-10-17 16-54-45" src="https://github.com/user-attachments/assets/d4b0e164-669b-473c-b000-d9643b5f77d9" />
 
 # suggested Additions 
-add the ability to add in multiple datasets for the inversion i.e can do Asc and Dsc at same time.
+Add the ability to add in multiple datasets for the inversion i.e can do Asc and Dsc at same time.
+Add more models
+
