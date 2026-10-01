@@ -3,13 +3,12 @@ from mpl_toolkits.mplot3d import Axes3D
 from scipy.stats import multivariate_normal
 from scipy.stats import norm
 from scipy.interpolate import griddata
-import pCDM_model as pCDM_fast
-import okada_model as okada_fast
-import UNE_three_component as UNE_three
+from model_registry import MODEL_REGISTRY, get_param_names, forward_from_registry
 
 import matplotlib.pyplot as plt
-import os 
+import os
 import pandas as pd
+import seaborn as sns
 import llh2local as llh
 import local2llh as l2llh
 
@@ -50,7 +49,7 @@ def plot_sa_diagnostics(energy_trace, temperature_trace, figure_folder=None):
     ax2.grid(True, alpha=0.3)
     
     plt.tight_layout()
-    plt.show()
+    # plt.show()
     
     if figure_folder is not None:
         plt.savefig(f"{figure_folder}/SA_diagnostics.png", dpi=300, bbox_inches='tight')
@@ -58,111 +57,135 @@ def plot_sa_diagnostics(energy_trace, temperature_trace, figure_folder=None):
 
 
 
-def plot_adaptation_diagnostics(proposal_std_evolution, acceptance_rate_evolution, 
+def plot_adaptation_diagnostics(proposal_std_evolution, acceptance_rate_evolution,
                                adaptive_interval, target_acceptance=0.23, figure_folder=None,
                                model_type='pCDM', proposal_std_iters=None):
     """
-    Plot diagnostics for adaptive MCMC including proposal scale evolution 
+    Plot diagnostics for adaptive MCMC including proposal scale evolution
     and acceptance rate evolution.
-    
-    Parameters:
-    -----------
-    proposal_std_evolution : dict
-        Evolution of proposal standard deviations for each parameter
-    acceptance_rate_evolution : dict
-        Evolution of acceptance rates for each parameter
-    adaptive_interval : int
-        Interval between adaptations
-    target_acceptance : float
-        Target acceptance rate
-    figure_folder : str, optional
-        Folder to save figures
-    proposal_std_iters : list, optional
-        Actual iteration numbers for each proposal_std checkpoint
     """
+    from matplotlib.ticker import MaxNLocator
     param_names = list(proposal_std_evolution.keys())
     n_params = len(param_names)
-    
-    # Calculate grid dimensions
+
     n_cols = 3
     n_rows = (n_params + n_cols - 1) // n_cols
-    
-    # Build x-axis: use real iteration numbers if provided, else checkpoint index * adaptive_interval
+
     n_checkpoints = len(proposal_std_evolution[param_names[0]])
     if proposal_std_iters is not None and len(proposal_std_iters) == n_checkpoints:
         std_x = np.array(proposal_std_iters)
     else:
         std_x = np.arange(1, n_checkpoints + 1) * adaptive_interval
-    
-    # Plot proposal standard deviation evolution
-    fig_height = max(8, 2.5 * n_rows)
-    plt.figure(figsize=(15, fig_height))
-    
+
+    # --- Proposal scale evolution ---
+    fig_height = max(6, 2.0 * n_rows)
+    fig, axes = plt.subplots(n_rows, n_cols, figsize=(12, fig_height))
+    axes = np.array(axes).reshape(n_rows, n_cols)
+
+    _LINE_C = '#2166AC'
     for i, param in enumerate(param_names):
-        ax = plt.subplot(n_rows, n_cols, i+1)
+        row, col = divmod(i, n_cols)
+        ax = axes[row, col]
         vals = np.array(proposal_std_evolution[param])
-        plt.plot(std_x, vals, 'b-o', alpha=0.7, markersize=3)
-        # Mark where burn-in ends (values freeze after that)
+        ax.plot(std_x, vals, color=_LINE_C, linewidth=0.8, marker='o',
+                markersize=2, alpha=0.8)
+
         if len(vals) > 1:
-            # Find first index where value stops changing
             diffs = np.abs(np.diff(vals))
             frozen_idx = np.argmax(diffs < 1e-12 * (vals[:-1] + 1e-30))
-            if frozen_idx > 0 and frozen_idx < len(std_x) - 1:
-                plt.axvline(std_x[frozen_idx], color='r', linestyle='--',
-                            alpha=0.6, label='burn-in end')
-                ax.legend(fontsize=7)
-        plt.xlabel('Iteration')
-        plt.ylabel(f'Proposal std')
-        plt.title(f'{param}')
-        plt.grid(True, alpha=0.3)
+            if 0 < frozen_idx < len(std_x) - 1:
+                ax.axvline(std_x[frozen_idx], color='#D6604D', linestyle='--',
+                           linewidth=1.0, alpha=0.8, label='Burn-in end')
+                ax.legend(fontsize=6.5, framealpha=0.7, loc='upper right')
 
-    plt.suptitle('Proposal scale evolution (one point per adaptation event)', y=1.01)
+        display = param if '__' not in param else param.replace('__', ':')
+        ax.set_title(display, fontsize=8, fontweight='bold', pad=3)
+        ax.set_ylabel('Proposal std', fontsize=7)
+        ax.tick_params(labelsize=6.5)
+        ax.grid(True, alpha=0.15, linewidth=0.5)
+        ax.yaxis.set_major_locator(MaxNLocator(nbins=4, prune='both'))
+        if row == n_rows - 1 or (i + n_cols) >= n_params:
+            ax.set_xlabel('Iteration', fontsize=7)
+
+    for j in range(n_params, n_rows * n_cols):
+        row, col = divmod(j, n_cols)
+        axes[row, col].set_visible(False)
+
+    fig.suptitle('Proposal scale evolution (one point per adaptation event)',
+                 fontsize=9, y=1.01)
+    plt.tight_layout(pad=1.2)
     if figure_folder is not None:
-        plt.savefig(f"{figure_folder}/proposal_scale_evolution.png", dpi=300, bbox_inches='tight')
-    plt.tight_layout()
-    plt.show()
-    
-    # Plot acceptance rate evolution
-    plt.figure(figsize=(15, fig_height))
-    
+        plt.savefig(f"{figure_folder}/proposal_scale_evolution.png", dpi=300,
+                    bbox_inches='tight')
+    plt.close(fig)
+
+    # --- Acceptance rate evolution ---
+    fig2, axes2 = plt.subplots(n_rows, n_cols, figsize=(12, fig_height))
+    axes2 = np.array(axes2).reshape(n_rows, n_cols)
+
     for i, param in enumerate(param_names):
-        plt.subplot(n_rows, n_cols, i+1)
+        row, col = divmod(i, n_cols)
+        ax = axes2[row, col]
         acc_vals = acceptance_rate_evolution[param]
         if len(acc_vals) > 0:
-            # x-axis: acceptance rates are stored at same checkpoints as std
             acc_x = std_x[:len(acc_vals)]
-            plt.plot(acc_x, acc_vals, 'go-', alpha=0.7, markersize=4)
-            plt.axhline(target_acceptance, color='r', linestyle='--', alpha=0.8, 
-                       label=f'Target ({target_acceptance:.2f})')
-        
-        plt.xlabel('Iteration')
-        plt.ylabel('Acceptance rate')
-        plt.title(f'{param}')
-        plt.grid(True, alpha=0.3)
-        plt.ylim(0, 1)
-        
-        if i == 0:
-            plt.legend()
+            ax.plot(acc_x, acc_vals, color='#4DAC26', linewidth=0.8, marker='o',
+                    markersize=2, alpha=0.8)
+            ax.axhline(target_acceptance, color='#D6604D', linestyle='--',
+                       linewidth=1.0, alpha=0.9,
+                       label=f'Target ({target_acceptance:.0%})')
 
-    plt.suptitle('Per-parameter acceptance rate (one point per adaptation event)', y=1.01)
+        display = param if '__' not in param else param.replace('__', ':')
+        ax.set_title(display, fontsize=8, fontweight='bold', pad=3)
+        ax.set_ylabel('Acceptance rate', fontsize=7)
+        ax.tick_params(labelsize=6.5)
+        ax.grid(True, alpha=0.15, linewidth=0.5)
+        ax.set_ylim(0, 1)
+        ax.yaxis.set_major_locator(MaxNLocator(nbins=4, prune='both'))
+        if row == n_rows - 1 or (i + n_cols) >= n_params:
+            ax.set_xlabel('Iteration', fontsize=7)
+        if i == 0:
+            ax.legend(fontsize=6.5, framealpha=0.7, loc='upper right')
+
+    for j in range(n_params, n_rows * n_cols):
+        row, col = divmod(j, n_cols)
+        axes2[row, col].set_visible(False)
+
+    fig2.suptitle('Per-parameter acceptance rate (one point per adaptation event)',
+                  fontsize=9, y=1.01)
+    plt.tight_layout(pad=1.2)
     if figure_folder is not None:
-        plt.savefig(f"{figure_folder}/acceptance_rate_evolution.png", dpi=300, bbox_inches='tight')
-    plt.tight_layout()
-    plt.show()
+        plt.savefig(f"{figure_folder}/acceptance_rate_evolution.png", dpi=300,
+                    bbox_inches='tight')
+    plt.close(fig2)
     
    
 
 
-def plot_inference_results(samples, log_likelihood_trace, rms_evolution, burn_in=2000, 
-                          u_los_obs=None, X_obs=None, Y_obs=None, 
+def plot_inference_results(samples, log_likelihood_trace, rms_evolution, burn_in=2000,
+                          u_los_obs=None, X_obs=None, Y_obs=None,
                           incidence_angle=None, heading=None, figure_folder=None,
                           proposal_std_evolution=None, acceptance_rate_evolution=None,
                           proposal_std_evolution_iters=None,
-                          adaptive_interval=None, target_acceptance=0.23,model_type='pCDM'):
+                          adaptive_interval=None, target_acceptance=0.23, model_type='pCDM',
+                          priors=None, full_res_npy_paths=None, ifg_dates=None,
+                          reference_point=None, noise_rms=None):
     """
     Plot MCMC results including trace plots, posterior distributions,
     and comparison between initial and optimal models.
     """
+    # Normalise priors to a flat {param: (lo, hi)} dict so sub-functions work
+    # regardless of whether the caller passed a dict or a list-of-dicts.
+    flat_priors_plot = {}
+    if priors is not None:
+        if isinstance(priors, list):
+            for p_dict in priors:
+                if isinstance(p_dict, dict):
+                    flat_priors_plot.update(p_dict)
+        elif isinstance(priors, dict):
+            flat_priors_plot = priors
+    flat_priors_plot = flat_priors_plot if flat_priors_plot else None
+
     # Remove burn-in samples
     samples_burned = {key: np.array(val[burn_in:]) for key, val in samples.items()}
     log_lik_burned = np.array(log_likelihood_trace[burn_in:])
@@ -180,58 +203,75 @@ def plot_inference_results(samples, log_likelihood_trace, rms_evolution, burn_in
     if figure_folder is not None:
         plt.savefig(f"{figure_folder}/log_likelihood_trace.png", dpi=300)
     
-    # Plot parameter traces and histograms
-    # If samples contain prefixed (multi-model) keys or model_type is a list, use the keys directly
-    if isinstance(model_type, list) or any('__' in k for k in samples.keys()):
-        all_params = list(samples.keys())
-    else:
-        # Define parameters based on single-model model_type
-        if model_type.lower() == 'pcdm':
-            all_params = ['X0', 'Y0', 'depth', 'DVx', 'DVy', 'DVz', 'omegaX', 'omegaY', 'omegaZ']
-        elif model_type.lower() == 'mogi':
-            all_params = ['X0', 'Y0', 'depth', 'dV']
-        elif model_type.lower() == 'okada':
-            all_params = ['X0', 'Y0', 'depth', 'length', 'width', 'strike', 'dip', 'rake', 'slip','opening']
-        elif model_type.lower() == 'une':
-            all_params = ['X0', 'Y0', 'depth', 'yield_kt', 'dv_factor', 'chimney_amp', 'compact_amp']
-        else:
-            # Fallback: use all available parameters from samples
-            all_params = list(samples.keys())
+    # Plot parameter posterior histograms
+    from matplotlib.lines import Line2D
+    from matplotlib.ticker import MaxNLocator
+
+    all_params = get_param_names(model_type, samples)
+    all_params = [p for p in all_params if not p.startswith('ramp_')]
     n_params = len(all_params)
     n_cols = 3
     n_rows = (n_params + n_cols - 1) // n_cols
-    
-    fig_height = max(8, 2.5 * n_rows)
-    plt.figure(figsize=(12, fig_height))
-    
+
+    fig_height = max(5, 2.0 * n_rows)
+    fig, axes = plt.subplots(n_rows, n_cols, figsize=(10, fig_height))
+    axes = np.array(axes).reshape(n_rows, n_cols)
+
+    _HIST_C = '#4472C4'
+    _MEAN_C = '#C00000'
+    _MAP_C  = '#70AD47'
+
+    best_idx = np.argmax(log_likelihood_trace[burn_in:])
+
+    def _sfmt(v):
+        """3-4 significant figures, no unnecessary trailing zeros."""
+        return f'{v:.4g}'
+
     for i, param in enumerate(all_params):
-        plt.subplot(n_rows, n_cols, i+1)
-        plt.hist(samples_burned[param], bins=50, density=True, alpha=0.7, color='skyblue')
-        plt.xlabel(param)
-        plt.ylabel('Density')
-        plt.title(f'{param} Posterior')
-        plt.grid(True, alpha=0.3)
-        
-        # Add statistics
-        mean_val = np.mean(samples_burned[param])
-        std_val = np.std(samples_burned[param])
-        plt.axvline(mean_val, color='red', linestyle='--', alpha=0.8)
-        # Also add maximum likelihood line
-        # Find the sample with highest likelihood after burn-in
-        burn_in_offset = burn_in
-        best_idx = np.argmax(log_likelihood_trace[burn_in_offset:])
-        map_value = samples_burned[param][best_idx]
-        plt.axvline(map_value, color='green', linestyle=':', alpha=0.8, linewidth=2)
-        plt.text(0.02, 0.98, f'μ={mean_val:.4f}\nσ={std_val:.4f}', 
-                transform=plt.gca().transAxes, verticalalignment='top',
-                bbox=dict(boxstyle='round', facecolor='white', alpha=0.8))
-        
+        row, col = divmod(i, n_cols)
+        ax = axes[row, col]
+
+        data = samples_burned[param]
+        ax.hist(data, bins=60, density=True,
+                color=_HIST_C, alpha=0.75, linewidth=0, edgecolor='none')
+
+        mean_val = np.mean(data)
+        std_val  = np.std(data)
+        map_val  = data[best_idx]
+
+        ax.axvline(mean_val, color=_MEAN_C, linestyle='--', linewidth=1.2, zorder=5)
+        ax.axvline(map_val,  color=_MAP_C,  linestyle=':',  linewidth=1.5, zorder=5)
+
+        display = param if '__' not in param else param.replace('__', ':')
+        ax.set_title(display, fontsize=8.5, fontweight='bold', pad=3)
+        ax.set_xlabel(display, fontsize=7.5)
+        ax.set_ylabel('Density' if col == 0 else '', fontsize=7.5)
+        ax.tick_params(labelsize=7)
+        ax.grid(True, alpha=0.15, linewidth=0.5)
+        ax.yaxis.set_major_locator(MaxNLocator(nbins=4, prune='both'))
+
+        ax.text(0.97, 0.97,
+                f'$\\mu$ = {_sfmt(mean_val)}\n$\\sigma$ = {_sfmt(std_val)}',
+                transform=ax.transAxes, ha='right', va='top', fontsize=7,
+                bbox=dict(facecolor='white', edgecolor='none', alpha=0.75, pad=1.5))
+
+    # Shared legend
+    legend_handles = [
+        Line2D([0], [0], color=_MEAN_C, linestyle='--', linewidth=1.2, label='Posterior mean'),
+        Line2D([0], [0], color=_MAP_C,  linestyle=':',  linewidth=1.5, label='MAP estimate'),
+    ]
+    fig.legend(handles=legend_handles, loc='lower right',
+               bbox_to_anchor=(1.0, 0.0), fontsize=7.5, framealpha=0.9)
+
+    for j in range(n_params, n_rows * n_cols):
+        row, col = divmod(j, n_cols)
+        axes[row, col].set_visible(False)
+
+    plt.tight_layout(pad=1.2)
     if figure_folder is not None:
-        plt.savefig(f"{figure_folder}/MCMC_traces_posteriors.png", dpi=300)
-    
-    
-    plt.tight_layout()
-    plt.show()
+        plt.savefig(f"{figure_folder}/MCMC_traces_posteriors.png", dpi=300,
+                    bbox_inches='tight')
+    plt.close(fig)
     
  
     # Plot adaptation diagnostics if available
@@ -244,16 +284,27 @@ def plot_inference_results(samples, log_likelihood_trace, rms_evolution, burn_in
     
     # Plot other diagnostics if observation data is provided
     if all(x is not None for x in [u_los_obs, X_obs, Y_obs, incidence_angle, heading]):
-        plot_model_comparison(samples, u_los_obs, X_obs, Y_obs, 
-                             incidence_angle, heading, log_likelihood_trace, burn_in, figure_folder=figure_folder,model_type=model_type)
+        plot_model_comparison(samples, u_los_obs, X_obs, Y_obs,
+                             incidence_angle, heading, log_likelihood_trace, burn_in, figure_folder=figure_folder, model_type=model_type,
+                             full_res_npy_paths=full_res_npy_paths, ifg_dates=ifg_dates,
+                             reference_point=reference_point, noise_rms=noise_rms)
         plot_rms_evolution(rms_evolution, figure_folder=figure_folder,model_type=model_type)
-        plot_parameter_convergence(samples, burn_in, figure_folder=figure_folder,model_type=model_type)
+        plot_parameter_convergence(samples, burn_in, figure_folder=figure_folder, model_type=model_type, priors=flat_priors_plot)
         plot_model_components(samples, u_los_obs, X_obs, Y_obs,
                               incidence_angle, heading, log_likelihood_trace,
                               burn_in=burn_in, figure_folder=figure_folder, model_type=model_type)
 
     # 2-D parameter trade-off corner plot
-    plot_corner(samples, burn_in=burn_in, figure_folder=figure_folder, model_type=model_type)
+    plot_corner(samples, burn_in=burn_in, figure_folder=figure_folder, model_type=model_type, priors=flat_priors_plot)
+
+    # Combined write-up figure (corner + data fit + multi-model components)
+    if all(x is not None for x in [u_los_obs, X_obs, Y_obs, incidence_angle, heading]):
+        try:
+            plot_report_figure(samples, u_los_obs, X_obs, Y_obs, incidence_angle, heading,
+                               log_likelihood_trace, burn_in=burn_in, figure_folder=figure_folder,
+                               model_type=model_type, ifg_dates=ifg_dates)
+        except Exception as exc:
+            print(f"  Warning: plot_report_figure failed: {exc}")
 
     # Print summary statistics
     print("\nPosterior Summary Statistics:")
@@ -296,11 +347,11 @@ def plot_rms_evolution(rms_evolution, figure_folder=None,model_type='pCDM'):
     
     
     plt.tight_layout()
-    plt.show()
+    # plt.show()
    
     return rms_evolution
 
-def plot_parameter_convergence(samples, burn_in=2000, figure_folder=None, model_type='pCDM'):
+def plot_parameter_convergence(samples, burn_in=2000, figure_folder=None, model_type='pCDM', priors=None):
     """
     Plot the convergence of each parameter over MCMC iterations.
     
@@ -317,76 +368,91 @@ def plot_parameter_convergence(samples, burn_in=2000, figure_folder=None, model_
     # Determine parameter list.
     # - If this is a multi-model run (model_type is list or samples use prefixed keys) use the exact sample keys.
     # - Otherwise fall back to the standard single-model parameter lists for nicer ordering.
-    if isinstance(model_type, list) or any('__' in k for k in samples.keys()):
-        all_params = list(samples.keys())
-    else:
-        if model_type.lower() == 'pcdm':
-            all_params = ['X0', 'Y0', 'depth', 'DVx', 'DVy', 'DVz', 'omegaX', 'omegaY', 'omegaZ']
-        elif model_type.lower() == 'mogi':
-            all_params = ['X0', 'Y0', 'depth', 'dV']
-        elif model_type.lower() == 'okada':
-            all_params = ['X0', 'Y0', 'depth', 'length', 'width', 'strike', 'dip', 'rake', 'slip','opening']
-        elif model_type.lower() == 'une':
-            all_params = ['X0', 'Y0', 'depth', 'yield_kt', 'dv_factor', 'chimney_amp', 'compact_amp']
-        else:
-            # Fallback: use all available parameters from samples
-            all_params = list(samples.keys())
-    
-    # Calculate grid dimensions
+    all_params = get_param_names(model_type, samples)
+    all_params = [p for p in all_params if not p.startswith('ramp_')]
+
+    from matplotlib.lines import Line2D
+    from matplotlib.ticker import MaxNLocator
+
     n_params = len(all_params)
     n_cols = 3
     n_rows = (n_params + n_cols - 1) // n_cols
-    
-    # Create figure
-    fig_height = max(8, 2.5 * n_rows)
-    plt.figure(figsize=(15, fig_height))
-    
+
+    fig_height = max(6, 2.0 * n_rows)
+    fig, axes = plt.subplots(n_rows, n_cols, figsize=(13, fig_height))
+    axes = np.array(axes).reshape(n_rows, n_cols)
+
+    _TRACE_C   = '#2166AC'
+    _RUNNING_C = '#F4A582'
+    _BURNIN_C  = '#D6604D'
+
+    def _sfmt(v):
+        return f'{v:.4g}'
+
+    legend_drawn = False
     for i, param in enumerate(all_params):
-        plt.subplot(n_rows, n_cols, i+1)
-        
-        # Plot trace
+        row, col = divmod(i, n_cols)
+        ax = axes[row, col]
+
         iterations = np.arange(len(samples[param]))
-        plt.plot(iterations, samples[param], alpha=0.7, color='blue', linewidth=0.5)
-        
-        # Mark burn-in period
+        ax.plot(iterations, samples[param],
+                color=_TRACE_C, linewidth=0.25, alpha=0.6, rasterized=True)
+
         if burn_in < len(samples[param]):
-            plt.axvline(burn_in, color='red', linestyle='--', alpha=0.8, 
-                        label='Burn-in end' if i == 0 else "")
-        
-        # Calculate and plot running mean for convergence assessment
+            ax.axvline(burn_in, color=_BURNIN_C, linestyle='--',
+                       linewidth=1.0, alpha=0.9)
+
         window_size = min(500, len(samples[param]) // 10)
         if window_size > 1:
-            running_mean = np.convolve(samples[param], np.ones(window_size)/window_size, mode='valid')
-            x_running = np.arange(window_size//2, window_size//2 + len(running_mean))
-            plt.plot(x_running, running_mean, 'orange', linewidth=2, alpha=0.8)
-        
-        plt.xlabel('Iteration')
-        # If keys are prefixed (joint-model) show a prettier label like 'pcdm_1:X0'
-        display_name = param if '__' not in param else param.replace('__', ':')
-        plt.ylabel(display_name)
-        plt.title(f'{display_name} Convergence')
-        plt.grid(True, alpha=0.3)
-        
-        # Add final value text
+            running_mean = np.convolve(
+                samples[param], np.ones(window_size) / window_size, mode='valid')
+            x_running = np.arange(window_size // 2,
+                                  window_size // 2 + len(running_mean))
+            ax.plot(x_running, running_mean,
+                    color=_RUNNING_C, linewidth=1.4, alpha=0.95)
+
+        if priors is not None:
+            pkey = param if param in priors else (
+                param.split('__')[1] if '__' in param else None)
+            if pkey and pkey in priors:
+                lo, hi = priors[pkey]
+                ax.set_ylim(lo, hi)
+
         if len(samples[param]) > burn_in:
             final_mean = np.mean(samples[param][burn_in:])
-            final_std = np.std(samples[param][burn_in:])
-            plt.text(0.02, 0.98, f'Final: {final_mean:.4f}±{final_std:.4f}', 
-                    transform=plt.gca().transAxes, verticalalignment='top',
-                    bbox=dict(boxstyle='round', facecolor='white', alpha=0.8))
-    
-    # Add legend only to first subplot to avoid clutter
-    if burn_in < len(samples[all_params[0]]):
-        plt.subplot(n_rows, n_cols, 1)
-        plt.legend()
-    
-  
-    
-    if figure_folder is not None:
-        plt.savefig(f"{figure_folder}/parameter_convergence.png", dpi=300, bbox_inches='tight')
+            final_std  = np.std(samples[param][burn_in:])
+            ax.text(0.97, 0.97,
+                    f'{_sfmt(final_mean)} ± {_sfmt(final_std)}',
+                    transform=ax.transAxes, ha='right', va='top', fontsize=6.5,
+                    bbox=dict(facecolor='white', edgecolor='none', alpha=0.75, pad=1.5))
 
-    plt.tight_layout()
-    plt.show()
+        display_name = param if '__' not in param else param.replace('__', ':')
+        ax.set_title(display_name, fontsize=8.5, fontweight='bold', pad=3)
+        ax.set_ylabel(display_name, fontsize=7.5)
+        ax.tick_params(labelsize=7)
+        ax.grid(True, alpha=0.15, linewidth=0.5)
+        ax.yaxis.set_major_locator(MaxNLocator(nbins=4, prune='both'))
+        if row == n_rows - 1 or (i + n_cols) >= n_params:
+            ax.set_xlabel('Iteration', fontsize=7.5)
+
+    # Single shared legend in figure
+    legend_handles = [
+        Line2D([0], [0], color=_TRACE_C,   linewidth=1.0, label='MCMC chain'),
+        Line2D([0], [0], color=_RUNNING_C, linewidth=1.4, label='Running mean'),
+        Line2D([0], [0], color=_BURNIN_C,  linewidth=1.0, linestyle='--', label='Burn-in end'),
+    ]
+    fig.legend(handles=legend_handles, loc='lower right',
+               bbox_to_anchor=(1.0, 0.0), fontsize=7.5, framealpha=0.9)
+
+    for j in range(n_params, n_rows * n_cols):
+        row, col = divmod(j, n_cols)
+        axes[row, col].set_visible(False)
+
+    plt.tight_layout(pad=1.2)
+    if figure_folder is not None:
+        plt.savefig(f"{figure_folder}/parameter_convergence.png", dpi=300,
+                    bbox_inches='tight')
+    plt.close(fig)
     
     # Calculate and print convergence diagnostics
     print("\nConvergence Diagnostics (post burn-in):")
@@ -410,8 +476,9 @@ def plot_parameter_convergence(samples, burn_in=2000, figure_folder=None, model_
             
 
 
-def plot_model_comparison(samples, u_los_obs, X_obs, Y_obs, 
-                         incidence_angle, heading, log_likelihood_trace, burn_in=2000, figure_folder=None,model_type='pCDM'):
+def plot_model_comparison(samples, u_los_obs, X_obs, Y_obs,
+                         incidence_angle, heading, log_likelihood_trace, burn_in=2000, figure_folder=None, model_type='pCDM',
+                         full_res_npy_paths=None, ifg_dates=None, _ifg_idx=None, reference_point=None, noise_rms=None):
     """
     Plot comparison between initial model, optimal model, and residuals.
     """
@@ -436,15 +503,29 @@ def plot_model_comparison(samples, u_los_obs, X_obs, Y_obs,
     # call the single-IFG plotting routine once per IFG and save figures separately.
     if isinstance(u_los_obs, (list, tuple, np.ndarray)) and len(u_los_obs) > 0 and hasattr(u_los_obs[0], '__iter__'):
         n_ifgs = len(u_los_obs)
-        inc_list = incidence_angle if isinstance(incidence_angle, (list, tuple, np.ndarray)) else [incidence_angle] * n_ifgs
+        inc_list  = incidence_angle if isinstance(incidence_angle, (list, tuple, np.ndarray)) else [incidence_angle] * n_ifgs
         head_list = heading if isinstance(heading, (list, tuple, np.ndarray)) else [heading] * n_ifgs
+        dates_list = list(ifg_dates) if ifg_dates is not None else [None] * n_ifgs
         for j in range(n_ifgs):
+            _date_j = dates_list[j] if j < len(dates_list) else None
             sub_folder = None
             if figure_folder is not None:
-                sub_folder = os.path.join(figure_folder, f"ifg_{j+1}")
+                folder_name = _date_j if _date_j else f"ifg_{j+1}"
+                sub_folder = os.path.join(figure_folder, folder_name)
                 os.makedirs(sub_folder, exist_ok=True)
-            # Recursive call for single-IFG plotting (delegates to same function)
-            plot_model_comparison(samples, u_los_obs[j], X_obs[j], Y_obs[j], inc_list[j], head_list[j], log_likelihood_trace, burn_in, figure_folder=sub_folder, model_type=model_type)
+            _fr_j = None
+            if full_res_npy_paths is not None:
+                if isinstance(full_res_npy_paths, (list, tuple)):
+                    _fr_j = full_res_npy_paths[j] if j < len(full_res_npy_paths) else None
+                else:
+                    _fr_j = full_res_npy_paths
+            try:
+                plot_model_comparison(samples, u_los_obs[j], X_obs[j], Y_obs[j], inc_list[j], head_list[j],
+                                      log_likelihood_trace, burn_in, figure_folder=sub_folder,
+                                      model_type=model_type, full_res_npy_paths=_fr_j, ifg_dates=_date_j,
+                                      _ifg_idx=j, reference_point=reference_point, noise_rms=noise_rms)
+            except Exception as exc:
+                print(f"  Warning: plot_model_comparison failed for IFG {j+1} ({_date_j}): {exc}")
         return
 
     # Convert angles to radians for LOS calculation (single IFG)
@@ -455,7 +536,41 @@ def plot_model_comparison(samples, u_los_obs, X_obs, Y_obs,
     los_e = np.sin(inc_rad) * np.cos(head_rad)
     los_n = -np.sin(inc_rad) * np.sin(head_rad)
     los_u = -np.cos(inc_rad)
-    
+
+    # Load full-resolution data for top-row panels (optional)
+    X_full = Y_full = u_los_full = u_los_opt_full = res_opt_full = None
+    los_e_full = los_n_full = los_u_full = None
+    if isinstance(full_res_npy_paths, str):
+        try:
+            fr_data = np.load(full_res_npy_paths, allow_pickle=True).item()
+            fr_lat = np.array(fr_data['Lat']).flatten()
+            fr_lon = np.array(fr_data['Lon']).flatten()
+            # Use the common reference point if provided; otherwise fall back to the file's centre
+            if reference_point is not None:
+                ref_lat = float(reference_point[0])
+                ref_lon = float(reference_point[1])
+            else:
+                ref_lon = float(fr_data['center_lon'])
+                ref_lat = float(fr_data['center_lat'])
+            ll_fr = np.array([fr_lon, fr_lat], dtype=float)
+            xy_fr = llh.llh2local(ll_fr, np.array([ref_lon, ref_lat], dtype=float))
+            u_full_raw = np.array(fr_data['Phase']).flatten()
+            valid = np.isfinite(u_full_raw)
+            X_full = xy_fr[0, :][valid]
+            Y_full = xy_fr[1, :][valid]
+            # Convert radians → LOS metres (Sentinel-1 C-band: λ = 55.5 mm)
+            _conv = 0.0555 / (4 * np.pi)
+            u_los_full = -u_full_raw[valid] * _conv
+            # Per-pixel LOS unit vectors from the full-res Inc/Heading arrays
+            inc_f_rad  = np.radians(np.array(fr_data['Inc']).flatten()[valid])
+            head_f_rad = np.radians(np.array(fr_data['Heading']).flatten()[valid])
+            los_e_full = np.sin(inc_f_rad) * np.cos(head_f_rad)
+            los_n_full = -np.sin(inc_f_rad) * np.sin(head_f_rad)
+            los_u_full = -np.cos(inc_f_rad)
+            print(f"  Full-resolution data loaded: {len(u_los_full):,} points")
+        except Exception as exc:
+            print(f"  Warning: could not load full-resolution data ({exc})")
+
     # Calculate initial and optimal models. Support single-model OR multi-model (prefixed sample keys).
     def _sum_models_from_sample_dict(sample_dict):
         """Sum contributions from one or more models using keys present in sample_dict.
@@ -464,40 +579,16 @@ def plot_model_comparison(samples, u_los_obs, X_obs, Y_obs,
         """
         # Detect prefixed multi-model keys
         if any('__' in k for k in sample_dict.keys()):
-            # Collect unique labels
             labels = sorted({k.split('__')[0] for k in sample_dict.keys()})
             ue_sum = np.zeros_like(X_obs, dtype=float)
             un_sum = np.zeros_like(X_obs, dtype=float)
             uv_sum = np.zeros_like(X_obs, dtype=float)
             for label in labels:
-                # Derive model name from label (e.g. 'pcdm_1' -> 'pcdm')
                 model_name = label.split('_')[0]
-                # Collect params for this label
                 params_here = {k.split('__')[1]: sample_dict[k] for k in sample_dict.keys() if k.startswith(label + '__')}
-                # Choose forward model
-                if 'pcdm' in model_name:
-                    ue_i, un_i, uv_i = pCDM_fast.pCDM(X_obs, Y_obs,
-                                                     params_here.get('X0'), params_here.get('Y0'), params_here.get('depth'),
-                                                     params_here.get('omegaX', 0), params_here.get('omegaY', 0), params_here.get('omegaZ', 0),
-                                                     params_here.get('DVx', 0), params_here.get('DVy', 0), params_here.get('DVz', 0), 0.25)
-                elif 'okada' in model_name:
-                    ue_i, un_i, uv_i = okada_fast.disloc3d3(X_obs, Y_obs,
-                                                            xoff=params_here.get('X0'), yoff=params_here.get('Y0'),
-                                                            depth=params_here.get('depth'), length=params_here.get('length'),
-                                                            width=params_here.get('width'), slip=params_here.get('slip'), opening=params_here.get('opening'),
-                                                            strike=params_here.get('strike'), dip=params_here.get('dip'), rake=params_here.get('rake'), nu=0.25)
-                elif 'une' in model_name:
-                    uv_i, ue_i, un_i = UNE_three.model(X_obs, Y_obs,
-                                                       depth=params_here.get('depth'), yield_kt=params_here.get('yield_kt'),
-                                                       dv_factor=params_here.get('dv_factor', 0.1),
-                                                       chimney_amp=params_here.get('chimney_amp', 0.15),
-                                                       chimney_height_fac=10, chimney_peck_k=0.35,
-                                                       compact_amp=params_here.get('compact_amp', 0.05),
-                                                       anelastic_fac=5,
-                                                       x0=params_here.get('X0', 0), y0=params_here.get('Y0', 0),
-                                                       nu=0.25, mu=30e9)
-                else:
-                    # Unsupported model name -> skip contribution
+                try:
+                    ue_i, un_i, uv_i = forward_from_registry(model_name, X_obs, Y_obs, params_here)
+                except ValueError:
                     ue_i = np.zeros_like(X_obs)
                     un_i = np.zeros_like(X_obs)
                     uv_i = np.zeros_like(X_obs)
@@ -506,31 +597,8 @@ def plot_model_comparison(samples, u_los_obs, X_obs, Y_obs,
                 uv_sum += np.asarray(uv_i, dtype=float)
             return ue_sum, un_sum, uv_sum
         else:
-            # Single-model: infer model_type from provided model_type string
             m = model_type.lower() if isinstance(model_type, str) else list(model_type)[0].lower()
-            if m == 'pcdm':
-                ue, un, uv = pCDM_fast.pCDM(X_obs, Y_obs,
-                                            sample_dict['X0'], sample_dict['Y0'], sample_dict['depth'],
-                                            sample_dict.get('omegaX', 0), sample_dict.get('omegaY', 0), sample_dict.get('omegaZ', 0),
-                                            sample_dict.get('DVx', 0), sample_dict.get('DVy', 0), sample_dict.get('DVz', 0), 0.25)
-            elif m == 'okada':
-                ue, un, uv = okada_fast.disloc3d3(X_obs, Y_obs, xoff=sample_dict['X0'], yoff=sample_dict['Y0'],
-                                                 depth=sample_dict['depth'], length=sample_dict.get('length'),
-                                                 width=sample_dict.get('width'), slip=sample_dict.get('slip'), opening=sample_dict.get('opening'),
-                                                 strike=sample_dict.get('strike'), dip=sample_dict.get('dip'), rake=sample_dict.get('rake'), nu=0.25)
-            elif m == 'une':
-                uv, ue, un = UNE_three.model(X_obs, Y_obs,
-                                             depth=sample_dict['depth'], yield_kt=sample_dict['yield_kt'],
-                                             dv_factor=sample_dict.get('dv_factor', 0.1),
-                                             chimney_amp=sample_dict.get('chimney_amp', 0.15),
-                                             chimney_height_fac=10, chimney_peck_k=0.35,
-                                             compact_amp=sample_dict.get('compact_amp', 0.05),
-                                             anelastic_fac=5,
-                                             x0=sample_dict.get('X0', 0), y0=sample_dict.get('Y0', 0),
-                                             nu=0.25, mu=30e9)
-            else:
-                raise ValueError(f"Unknown model_type: {model_type}")
-            return ue, un, uv
+            return forward_from_registry(m, X_obs, Y_obs, sample_dict)
 
     # Initial model
     ue_init, un_init, uv_init = _sum_models_from_sample_dict(initial_params)
@@ -540,10 +608,83 @@ def plot_model_comparison(samples, u_los_obs, X_obs, Y_obs,
     ue_opt, un_opt, uv_opt = _sum_models_from_sample_dict(optimal_params)
     u_los_opt = -(ue_opt * los_e + un_opt * los_n + uv_opt * los_u)
     
+    # ── Ramp/offset correction ──────────────────────────────────────────────
+    # Detect ramp parameters in the sample dict (named ramp_a/b/c or ramp_a_j/b_j/c_j)
+    _ramp_keys = [k for k in optimal_params if k.startswith('ramp_')]
+    _has_ramp = bool(_ramp_keys)
+    _fit_linear = any('ramp_a' in k for k in _ramp_keys)
+
+    def _compute_ramp(p, X, Y):
+        """Evaluate ramp at coordinates X, Y using params p (single-IFG; no suffix)."""
+        r = p.get('ramp_c', 0.0) * np.ones(len(X))
+        if _fit_linear:
+            r = r + p.get('ramp_a', 0.0) * X + p.get('ramp_b', 0.0) * Y
+        return r
+
+    def _compute_ramp_suffixed(p, X, Y, sfx):
+        """Evaluate ramp with per-IFG suffix (multi-IFG)."""
+        r = p.get(f'ramp_c{sfx}', 0.0) * np.ones(len(X))
+        if _fit_linear:
+            r = r + p.get(f'ramp_a{sfx}', 0.0) * X + p.get(f'ramp_b{sfx}', 0.0) * Y
+        return r
+
+    if _has_ramp:
+        # Determine if multi-IFG suffix ('ramp_c_0') or plain ('ramp_c')
+        _multi_sfx = any(k[-2:].lstrip('_').isdigit() for k in _ramp_keys if k.startswith('ramp_c'))
+        if _multi_sfx:
+            # Use _ifg_idx to select the correct IFG's ramp params (default 0)
+            _ramp_sfx = f'_{_ifg_idx}' if _ifg_idx is not None else '_0'
+            ramp_opt_obs  = _compute_ramp_suffixed(optimal_params,  X_obs, Y_obs, _ramp_sfx)
+            ramp_init_obs = _compute_ramp_suffixed(initial_params,  X_obs, Y_obs, _ramp_sfx)
+        else:
+            ramp_opt_obs  = _compute_ramp(optimal_params,  X_obs, Y_obs)
+            ramp_init_obs = _compute_ramp(initial_params,  X_obs, Y_obs)
+        u_los_opt_with_ramp  = u_los_opt  + ramp_opt_obs
+        u_los_init_with_ramp = u_los_init + ramp_init_obs
+    else:
+        u_los_opt_with_ramp  = u_los_opt
+        u_los_init_with_ramp = u_los_init
+        ramp_opt_obs = np.zeros_like(u_los_obs)
+
     # Calculate residuals
-    residual_init = u_los_obs - u_los_init
-    residual_opt = u_los_obs - u_los_opt
-    
+    residual_init = u_los_obs - u_los_init_with_ramp
+    residual_opt  = u_los_obs - u_los_opt_with_ramp
+
+    # Evaluate MAP model at full-resolution points (for top-row panels)
+    if X_full is not None:
+        def _eval_at(X, Y, sample_dict):
+            if any('__' in k for k in sample_dict.keys()):
+                labels = sorted({k.split('__')[0] for k in sample_dict.keys()})
+                ue_s = np.zeros(len(X), dtype=float)
+                un_s = np.zeros(len(X), dtype=float)
+                uv_s = np.zeros(len(X), dtype=float)
+                for label in labels:
+                    model_name = label.split('_')[0]
+                    params_here = {k.split('__')[1]: sample_dict[k] for k in sample_dict.keys() if k.startswith(label + '__')}
+                    try:
+                        ue_i, un_i, uv_i = forward_from_registry(model_name, X, Y, params_here)
+                        ue_s += np.asarray(ue_i, dtype=float)
+                        un_s += np.asarray(un_i, dtype=float)
+                        uv_s += np.asarray(uv_i, dtype=float)
+                    except ValueError:
+                        pass
+                return ue_s, un_s, uv_s
+            else:
+                m = model_type.lower() if isinstance(model_type, str) else list(model_type)[0].lower()
+                return forward_from_registry(m, X, Y, sample_dict)
+
+        ue_f, un_f, uv_f = _eval_at(X_full, Y_full, optimal_params)
+        u_los_opt_full = -(ue_f * los_e_full + un_f * los_n_full + uv_f * los_u_full)
+        # Add ramp to full-res optimal model so it matches the observed data
+        if _has_ramp:
+            if _multi_sfx:
+                _ramp_sfx = f'_{_ifg_idx}' if _ifg_idx is not None else '_0'
+                ramp_full = _compute_ramp_suffixed(optimal_params, X_full, Y_full, _ramp_sfx)
+            else:
+                ramp_full = _compute_ramp(optimal_params, X_full, Y_full)
+            u_los_opt_full = u_los_opt_full + ramp_full
+        res_opt_full = u_los_full - u_los_opt_full
+
     # Create regular grid for interpolation if data is scattered
     if len(np.unique(X_obs)) > 1 and len(np.unique(Y_obs)) > 1:
         # Create regular grid
@@ -555,57 +696,59 @@ def plot_model_comparison(samples, u_los_obs, X_obs, Y_obs,
         
         # Interpolate data to regular grid
         
-        u_obs_grid = griddata((X_obs, Y_obs), u_los_obs, (Xi, Yi), method='cubic')
-        u_init_grid = griddata((X_obs, Y_obs), u_los_init, (Xi, Yi), method='cubic')
-        u_opt_grid = griddata((X_obs, Y_obs), u_los_opt, (Xi, Yi), method='cubic')
-        res_init_grid = griddata((X_obs, Y_obs), residual_init, (Xi, Yi), method='cubic')
-        res_opt_grid = griddata((X_obs, Y_obs), residual_opt, (Xi, Yi), method='cubic')
-        
+        u_obs_grid      = griddata((X_obs, Y_obs), u_los_obs,              (Xi, Yi), method='cubic')
+        u_init_grid     = griddata((X_obs, Y_obs), u_los_init_with_ramp,  (Xi, Yi), method='cubic')
+        u_opt_grid      = griddata((X_obs, Y_obs), u_los_opt_with_ramp,   (Xi, Yi), method='cubic')
+        res_init_grid   = griddata((X_obs, Y_obs), residual_init,          (Xi, Yi), method='cubic')
+        res_opt_grid    = griddata((X_obs, Y_obs), residual_opt,           (Xi, Yi), method='cubic')
+        ramp_opt_grid   = griddata((X_obs, Y_obs), ramp_opt_obs,           (Xi, Yi), method='cubic') if _has_ramp else None
+
         X_plot, Y_plot = Xi, Yi
-        u_obs_plot = u_obs_grid
-        u_init_plot = u_init_grid
-        u_opt_plot = u_opt_grid
-        res_init_plot = res_init_grid
-        res_opt_plot = res_opt_grid
+        u_obs_plot      = u_obs_grid
+        u_init_plot     = u_init_grid
+        u_opt_plot      = u_opt_grid
+        res_init_plot   = res_init_grid
+        res_opt_plot    = res_opt_grid
         X_plot_scatter, Y_plot_scatter = X_obs, Y_obs
-        u_obs_plot_scatter = u_los_obs
-        u_init_plot_scatter = u_los_init
-        u_opt_plot_scatter = u_los_opt
+        u_obs_plot_scatter  = u_los_obs
+        u_init_plot_scatter = u_los_init_with_ramp
+        u_opt_plot_scatter  = u_los_opt_with_ramp
         res_init_plot_scatter = residual_init
-        res_opt_plot_scatter = residual_opt
+        res_opt_plot_scatter  = residual_opt
     else:
         # Assume data is already on regular grid
         try:
             grid_shape = (int(np.sqrt(len(X_obs))), int(np.sqrt(len(X_obs))))
             X_plot = X_obs.reshape(grid_shape)
             Y_plot = Y_obs.reshape(grid_shape)
-            u_obs_plot = u_los_obs.reshape(grid_shape)
-            u_init_plot = u_los_init.reshape(grid_shape)
-            u_opt_plot = u_los_opt.reshape(grid_shape)
+            u_obs_plot    = u_los_obs.reshape(grid_shape)
+            u_init_plot   = u_los_init_with_ramp.reshape(grid_shape)
+            u_opt_plot    = u_los_opt_with_ramp.reshape(grid_shape)
             res_init_plot = residual_init.reshape(grid_shape)
-            res_opt_plot = residual_opt.reshape(grid_shape)
+            res_opt_plot  = residual_opt.reshape(grid_shape)
+            ramp_opt_grid = ramp_opt_obs.reshape(grid_shape) if _has_ramp else None
 
             X_plot_scatter, Y_plot_scatter = X_obs, Y_obs
-            u_obs_plot_scatter = u_los_obs
-            u_init_plot_scatter = u_los_init
-            u_opt_plot_scatter = u_los_opt
+            u_obs_plot_scatter    = u_los_obs
+            u_init_plot_scatter   = u_los_init_with_ramp
+            u_opt_plot_scatter    = u_los_opt_with_ramp
             res_init_plot_scatter = residual_init
-            res_opt_plot_scatter = residual_opt
-            print('MADE IT THIS FAR')
-            
+            res_opt_plot_scatter  = residual_opt
+
         except:
             print("Could not reshape data for plotting. Using scatter plots instead.")
             X_plot, Y_plot = X_obs, Y_obs
-            u_obs_plot = u_los_obs
-            u_init_plot = u_los_init
-            u_opt_plot = u_los_opt
+            u_obs_plot    = u_los_obs
+            u_init_plot   = u_los_init_with_ramp
+            u_opt_plot    = u_los_opt_with_ramp
             res_init_plot = residual_init
-            res_opt_plot = residual_opt
+            res_opt_plot  = residual_opt
+            ramp_opt_grid = None
     
-    # Create comparison plot
-    fig, axes = plt.subplots(2, 3, figsize=(15, 10))
-    # for ax in axes:
-    #     ax.set_aspect('equal')
+    # Create comparison plot — 3 rows when a ramp was fitted, 2 otherwise
+    _n_rows = 3 if _has_ramp else 2
+    fig, axes = plt.subplots(_n_rows, 3, figsize=(15, 5 * _n_rows))
+    axes = np.array(axes).reshape(_n_rows, 3)
     
     # Determine common color scale for observed and optimal
     vmin = np.nanmin([u_obs_plot, u_opt_plot])
@@ -620,21 +763,30 @@ def plot_model_comparison(samples, u_los_obs, X_obs, Y_obs,
     res_vmin = -res_vmax
     
     if X_plot.ndim == 2:
-        # Contour plots with consistent color scale
-        im1 = axes[0,0].contourf(X_plot, Y_plot, u_obs_plot, levels=20, cmap='RdBu_r', vmin=vmin, vmax=vmax)
-        axes[0,0].set_title('Observed Data')
-        
-        im2 = axes[0,1].contourf(X_plot, Y_plot, u_opt_plot, levels=20, cmap='RdBu_r', vmin=vmin, vmax=vmax)
-        axes[0,1].set_title('Optimal Model')
-        
-        # Use the same color scale for residuals as the data for direct comparison
-        im3 = axes[0,2].contourf(X_plot, Y_plot, res_opt_plot, levels=20, cmap='RdBu_r', vmin=vmin, vmax=vmax)
-        axes[0,2].set_title('Optimal Residual')
-        
-        # Add a single colorbar across the bottom representing all three plots
-        fig.subplots_adjust(bottom=0.15)
-        cbar_ax = fig.add_axes([0.15, 0.05, 0.7, 0.03])
-        plt.colorbar(im1, cax=cbar_ax, orientation='horizontal', label='Displacement (m)')
+        if X_full is not None:
+            # Full-resolution scatter for top row
+            _top_vmax = max(abs(np.nanmin(u_los_full)), abs(np.nanmax(u_los_full)),
+                            abs(np.nanmin(u_los_opt_full)), abs(np.nanmax(u_los_opt_full)))
+            _s = max(0.05, min(2.0, 5e4 / len(X_full)))
+            im1 = axes[0, 0].scatter(X_full, Y_full, c=u_los_full, cmap='RdBu_r',
+                                     vmin=-_top_vmax, vmax=_top_vmax, s=_s, rasterized=True)
+            axes[0, 0].set_title('Observed Data (Full Resolution)')
+            im2 = axes[0, 1].scatter(X_full, Y_full, c=u_los_opt_full, cmap='RdBu_r',
+                                     vmin=-_top_vmax, vmax=_top_vmax, s=_s, rasterized=True)
+            axes[0, 1].set_title('Optimal Model (Full Resolution)')
+            im3 = axes[0, 2].scatter(X_full, Y_full, c=res_opt_full, cmap='RdBu_r',
+                                     vmin=-_top_vmax, vmax=_top_vmax, s=_s, rasterized=True)
+            axes[0, 2].set_title('Optimal Residual (Full Resolution)')
+            _top_row_im = im1  # used for the shared bottom colorbar, see below
+        else:
+            # Contour plots from gridded interpolation
+            im1 = axes[0, 0].contourf(X_plot, Y_plot, u_obs_plot, levels=20, cmap='RdBu_r', vmin=vmin, vmax=vmax)
+            axes[0, 0].set_title('Observed Data')
+            im2 = axes[0, 1].contourf(X_plot, Y_plot, u_opt_plot, levels=20, cmap='RdBu_r', vmin=vmin, vmax=vmax)
+            axes[0, 1].set_title('Optimal Model')
+            im3 = axes[0, 2].contourf(X_plot, Y_plot, res_opt_plot, levels=20, cmap='RdBu_r', vmin=vmin, vmax=vmax)
+            axes[0, 2].set_title('Optimal Residual')
+            _top_row_im = im1  # used for the shared bottom colorbar, see below
     
         # Scatter plots
         im1 = axes[1,0].scatter(X_plot_scatter, Y_plot_scatter, c=u_obs_plot_scatter, cmap='RdBu_r', vmin=vmin, vmax=vmax)
@@ -657,191 +809,454 @@ def plot_model_comparison(samples, u_los_obs, X_obs, Y_obs,
         # Bottom row: Residual
         im3 = axes[0,2].scatter(X_plot, Y_plot, c=res_opt_plot, cmap='RdBu_r')
         axes[0,2].set_title('Optimal Residual')
+        _top_row_im = im1  # used for the shared bottom colorbar, see below
    
     
 
-    # RMS comparison in the bottom right subplot
-    rms_init = np.sqrt(np.nanmean(residual_init**2))
-    rms_opt = np.sqrt(np.nanmean(residual_opt**2))
+    # ── Ramp row (row 2) — only when ramp parameters were estimated ─────────
+    if _has_ramp and _n_rows == 3:
+        _ramp_abs = np.nanmax(np.abs(ramp_opt_obs)) if ramp_opt_obs is not None else 1.0
+        _ramp_vmax = _ramp_abs if _ramp_abs > 0 else 1.0
+
+        # Col 0: ramp field on observation grid
+        if ramp_opt_grid is not None and X_plot.ndim == 2:
+            _rim1 = axes[2, 0].contourf(X_plot, Y_plot, ramp_opt_grid, levels=20,
+                                         cmap='RdBu_r', vmin=-_ramp_vmax, vmax=_ramp_vmax)
+            plt.colorbar(_rim1, ax=axes[2, 0], fraction=0.046, pad=0.04).set_label('m')
+        else:
+            _rim1 = axes[2, 0].scatter(X_plot_scatter, Y_plot_scatter, c=ramp_opt_obs,
+                                        cmap='RdBu_r', vmin=-_ramp_vmax, vmax=_ramp_vmax)
+            plt.colorbar(_rim1, ax=axes[2, 0], fraction=0.046, pad=0.04).set_label('m')
+        axes[2, 0].set_title('Ramp / Offset (MAP)')
+        axes[2, 0].set_xlabel('X (m)')
+        axes[2, 0].set_ylabel('Y (m)')
+
+        # Col 1: ramp-corrected observed data (observed minus ramp)
+        _u_deramped = u_los_obs - ramp_opt_obs
+        _dr_vmax = max(abs(np.nanmin(_u_deramped)), abs(np.nanmax(_u_deramped)))
+        _rim2 = axes[2, 1].scatter(X_plot_scatter, Y_plot_scatter, c=_u_deramped,
+                                    cmap='RdBu_r', vmin=-_dr_vmax, vmax=_dr_vmax)
+        plt.colorbar(_rim2, ax=axes[2, 1], fraction=0.046, pad=0.04).set_label('m')
+        axes[2, 1].set_title('Ramp-Corrected Observed')
+        axes[2, 1].set_xlabel('X (m)')
+
+        # Col 2: source model only (no ramp)
+        _sm_vmax = max(abs(np.nanmin(u_los_opt)), abs(np.nanmax(u_los_opt)))
+        _rim3 = axes[2, 2].scatter(X_plot_scatter, Y_plot_scatter, c=u_los_opt,
+                                    cmap='RdBu_r', vmin=-_sm_vmax, vmax=_sm_vmax)
+        plt.colorbar(_rim3, ax=axes[2, 2], fraction=0.046, pad=0.04).set_label('m')
+        axes[2, 2].set_title('Source Model Only (no ramp)')
+        axes[2, 2].set_xlabel('X (m)')
+
+    # Axis labels for rows 0 and 1
+    for _r in range(min(2, _n_rows)):
+        axes[_r, 0].set_ylabel('Y (m)')
+        for _c in range(3):
+            axes[_r, _c].set_xlabel('X (m)')
+
+    # ── Fault trace overlay (Okada models only) ─────────────────────────────
+    _mt = model_type if isinstance(model_type, str) else (list(model_type)[0] if model_type else '')
+    if str(_mt).lower() == 'okada' and 'X0' in optimal_params:
+        def _okada_corners_m(p):
+            sr = np.radians(p['strike']); dr = np.radians(p['dip'])
+            ss, cs, cd = np.sin(sr), np.cos(sr), np.cos(dr)
+            s_e, s_n = ss, cs        # along-strike unit vector (E, N)
+            d_e, d_n = cs, -ss       # up-dip horizontal unit vector
+            hw = (p['width'] / 2) * cd  # horizontal half-width projection
+            L  =  p['length'] / 2
+            x0, y0 = p['X0'], p['Y0']
+            X_tc = x0 - d_e * hw;  Y_tc = y0 - d_n * hw
+            X_bc = x0 + d_e * hw;  Y_bc = y0 + d_n * hw
+            cx = np.array([X_tc - s_e*L, X_tc + s_e*L, X_bc + s_e*L, X_bc - s_e*L])
+            cy = np.array([Y_tc - s_n*L, Y_tc + s_n*L, Y_bc + s_n*L, Y_bc - s_n*L])
+            return cx, cy
+
+        _cx, _cy = _okada_corners_m(optimal_params)
+        _poly_x  = np.append(_cx, _cx[0])
+        _poly_y  = np.append(_cy, _cy[0])
+        # top (shallowest) edge = indices 0–1
+        _top_x, _top_y = _cx[:2], _cy[:2]
+
+        for _r in range(axes.shape[0]):
+            for _c in range(axes.shape[1]):
+                _ax = axes[_r, _c]
+                if not _ax.get_visible():
+                    continue
+                _ax.plot(_poly_x, _poly_y, '-', color='black', lw=1.5, zorder=10)
+                _ax.plot(_top_x, _top_y, '-', color='black', lw=3.0, zorder=11,
+                         label='Fault top edge')
+                _ax.plot(optimal_params['X0'], optimal_params['Y0'],
+                         '+', color='black', ms=8, mew=2, zorder=12)
+
+    if noise_rms is not None:
+        fig.suptitle(f'Noise RMS: {noise_rms*100:.2f} cm', fontsize=11, y=1.001)
+
+    # Reserve a fixed strip at the bottom of the *whole* figure for a shared
+    # colorbar BEFORE calling tight_layout, via its `rect` argument -- this
+    # makes tight_layout fit every row (2 or 3) into the space above the
+    # strip, so the colorbar (placed inside the strip afterwards) can never
+    # overlap row content regardless of how many rows the figure has. This
+    # replaces two earlier attempts (a hardcoded-position axes that assumed a
+    # fixed row count, then a per-row colorbar squeezed between rows) that
+    # both ended up overlapping panels for some row counts.
+    _cbar_strip = 0.10
+    plt.tight_layout(pad=1.2, h_pad=2.0, rect=[0, _cbar_strip, 1, 1])
+    _cbar_ax = fig.add_axes([0.15, _cbar_strip * 0.25, 0.7, _cbar_strip * 0.35])
+    fig.colorbar(_top_row_im, cax=_cbar_ax, orientation='horizontal', label='Displacement (m)')
+
     if figure_folder is not None:
-        plt.savefig(f"{figure_folder}/Model_Comparison.png", dpi=300)
+        _date_str = f"_{ifg_dates}" if isinstance(ifg_dates, str) and ifg_dates else ""
+        plt.savefig(f"{figure_folder}/Model_Comparison{_date_str}.png", dpi=300, bbox_inches='tight')
+    plt.close(fig)
 
 
-def plot_corner(samples, burn_in=0, figure_folder=None, model_type='pCDM',
-                nbins=40, smooth=True, figsize_per_param=2.0):
+def plot_corner_unused(samples, burn_in=0, figure_folder=None, model_type='pCDM',
+                       nbins=40, smooth=True, figsize_per_param=3.0, priors=None):
     """
-    Corner / pair plot: shows the marginal 1-D posterior on the diagonal and
-    the 2-D joint posterior (parameter trade-off) in every off-diagonal cell.
+    Corner plot showing parameter trade-offs via seaborn PairGrid.
 
-    Lower triangle  – filled 2-D histogram (log-density) showing trade-offs.
-    Diagonal        – 1-D histogram (marginal posterior) with mean ± 1σ lines.
-    Upper triangle  – hidden (blank) for a clean layout.
-
-    Parameters
-    ----------
-    samples : dict
-        Raw MCMC sample dict  {param_name: list/array}.
-    burn_in : int
-        How many leading samples to discard as burn-in (applied strictly).
-    figure_folder : str or None
-        Directory in which to save corner_plot.png.  Skipped when None.
-    model_type : str or list
-        Used to determine parameter ordering.
-    nbins : int
-        Number of bins along each axis for the 2-D histograms.
-    smooth : bool
-        If True, apply a light Gaussian smoothing to 2-D histograms.
-    figsize_per_param : float
-        Inches allocated per parameter axis.
+    Lower triangle – 2-D density (viridis) showing how parameters trade off.
+    Diagonal       – marginal histogram with mean (red) and mode (green) lines.
+    Upper triangle – Pearson correlation coefficient.
     """
     from scipy.ndimage import gaussian_filter
+    from scipy.stats import gaussian_kde
+    from matplotlib.ticker import MaxNLocator
 
-    # ------------------------------------------------------------------ #
-    # 1. Parameter list                                                   #
-    # ------------------------------------------------------------------ #
-    if isinstance(model_type, list) or any('__' in k for k in samples.keys()):
-        all_params = list(samples.keys())
-    else:
-        _m = model_type.lower() if isinstance(model_type, str) else ''
-        if _m == 'pcdm':
-            all_params = ['X0', 'Y0', 'depth', 'DVx', 'DVy', 'DVz', 'omegaX', 'omegaY', 'omegaZ']
-        elif _m == 'mogi':
-            all_params = ['X0', 'Y0', 'depth', 'dV']
-        elif _m == 'okada':
-            all_params = ['X0', 'Y0', 'depth', 'length', 'width', 'strike', 'dip', 'rake', 'slip', 'opening']
-        elif _m == 'une':
-            all_params = ['X0', 'Y0', 'depth', 'yield_kt', 'dv_factor', 'chimney_amp', 'compact_amp']
-        else:
-            all_params = list(samples.keys())
+    TICK_SIZE  = 11
+    LABEL_SIZE = 13
+
+    all_params = get_param_names(model_type, samples)
     all_params = [p for p in all_params if p in samples]
-
     n = len(all_params)
     if n < 2:
         print('plot_corner: need at least 2 parameters — skipping.')
         return
 
-    # ------------------------------------------------------------------ #
-    # 2. Slice strictly to post-burn-in samples                          #
-    # ------------------------------------------------------------------ #
-    n_total    = len(samples[all_params[0]])
-    burn_safe  = max(0, min(int(burn_in), n_total - 2))
-    n_post     = n_total - burn_safe
-    print(f'  plot_corner: using {n_post:,} post-burn-in samples '
-          f'(discarded first {burn_safe:,}).')
+    n_total   = len(samples[all_params[0]])
+    burn_safe = max(0, min(int(burn_in), n_total - 2))
+    print(f'  plot_corner: {n_total - burn_safe:,} post-burn-in samples.')
 
     chains = np.column_stack(
         [np.asarray(samples[p][burn_safe:], dtype=float) for p in all_params]
-    )   # shape (n_post, n_params)
+    )
 
-    # Prettier labels for multi-model prefixed keys  e.g. 'pcdm_1__X0' -> 'pcdm_1\nX0'
-    labels = [p.replace('__', '\n') for p in all_params]
+    labels       = [p.replace('__', '\n') for p in all_params]
+    label_to_idx = {lbl: i for i, lbl in enumerate(labels)}
 
-    # ------------------------------------------------------------------ #
-    # 3. Axis ranges: 1–99th percentile of POST-BURN-IN chains + margin  #
-    # ------------------------------------------------------------------ #
-    lo = np.percentile(chains, 1,  axis=0)
-    hi = np.percentile(chains, 99, axis=0)
-    span   = hi - lo
-    # Protect against degenerate (constant) parameters
-    span   = np.where(span > 0, span, np.abs(hi) * 0.1 + 1e-9)
-    margin = 0.05 * span
-    lo     = lo - margin
-    hi     = hi + margin
+    # Axis ranges — always add 3 % padding so data never clips the edge
+    if priors is not None:
+        lo = np.zeros(n)
+        hi = np.zeros(n)
+        for i, param in enumerate(all_params):
+            key = param if param in priors else param.split('__')[1] if '__' in param else None
+            if key and key in priors:
+                lo[i], hi[i] = priors[key]
+            else:
+                lo[i] = np.percentile(chains[:, i], 1)
+                hi[i] = np.percentile(chains[:, i], 99)
+        span = np.where((hi - lo) > 0, hi - lo, np.abs(hi) * 0.1 + 1e-9)
+        lo -= 0.03 * span
+        hi += 0.03 * span
+    else:
+        lo   = np.percentile(chains, 1,  axis=0)
+        hi   = np.percentile(chains, 99, axis=0)
+        span = np.where((hi - lo) > 0, hi - lo, np.abs(hi) * 0.1 + 1e-9)
+        lo  -= 0.05 * span
+        hi  += 0.05 * span
 
-    # ------------------------------------------------------------------ #
-    # 4. Build figure                                                     #
-    # ------------------------------------------------------------------ #
-    fig_size = max(6, figsize_per_param * n)
-    fig, axes = plt.subplots(n, n, figsize=(fig_size, fig_size))
-    # axes is always 2-D even for n==2
-    if n == 1:
-        axes = np.array([[axes]])
+    # Track the last contourf artist for the colorbar
+    _density_artist = [None]
 
-    CMAP_2D  = 'viridis'
-    COL_HIST = '#4C72B0'
-    COL_MEAN = '#E74C3C'
-    COL_STD  = '#E74C3C'
+    def _plot_2d_density(x, y, **kwargs):
+        ax     = plt.gca()
+        ix, iy = label_to_idx[x.name], label_to_idx[y.name]
+
+        H, _, _ = np.histogram2d(x.values, y.values, bins=nbins,
+                                  range=[[lo[ix], hi[ix]], [lo[iy], hi[iy]]])
+        H = H.T
+
+        if H.max() == 0:
+            ax.set_visible(False)
+            return
+
+        if smooth:
+            H = gaussian_filter(H.astype(float), sigma=max(0.5, nbins / 40.0))
+
+        xi = np.linspace(lo[ix], hi[ix], H.shape[1])
+        yi = np.linspace(lo[iy], hi[iy], H.shape[0])
+        cf = ax.contourf(xi, yi, np.sqrt(H), levels=25, cmap='viridis', extend='both')
+        _density_artist[0] = cf
+        ax.set_xlim(lo[ix], hi[ix])
+        ax.set_ylim(lo[iy], hi[iy])
+
+    def _plot_diagonal(x, **kwargs):
+        ax = plt.gca()
+        ix = label_to_idx[x.name]
+        x_data = x.values
+
+        if np.std(x_data) == 0:
+            ax.set_visible(False)
+            return
+
+        counts, edges = np.histogram(x_data, bins=nbins,
+                                     range=(lo[ix], hi[ix]), density=True)
+        ax.bar(edges[:-1], counts, width=np.diff(edges),
+               color='#4B9CD3', alpha=0.65, align='edge', linewidth=0)
+
+        kde_mode = None
+        if hi[ix] > lo[ix] and np.std(x_data) > 0:
+            try:
+                kde_fn = gaussian_kde(x_data, bw_method='scott')
+                x_kde  = np.linspace(lo[ix], hi[ix], 400)
+                y_kde  = kde_fn(x_kde)
+                ax.plot(x_kde, y_kde, color='white', lw=1.8, zorder=4)
+                kde_mode = x_kde[np.argmax(y_kde)]
+            except Exception:
+                pass
+
+        ax.axvline(np.mean(x_data), color='#FF6B6B', lw=2.0, ls='-',
+                   zorder=5, label='mean')
+        if kde_mode is not None:
+            ax.axvline(kde_mode, color='#2ECC71', lw=2.0, ls='--', zorder=5,
+                       label='mode')
+
+        ax.set_xlim(lo[ix], hi[ix])
+        ax.set_ylim(bottom=0)
+        ax.yaxis.set_visible(False)
+
+        # Legend only on the first diagonal panel
+        if ix == 0:
+            ax.legend(fontsize=8, loc='upper right',
+                      framealpha=0.8, handlelength=1.4)
+
+    def _plot_upper_corr(*_, **__):
+        plt.gca().set_visible(False)
+
+    df = pd.DataFrame(chains, columns=labels)
+    g  = sns.PairGrid(df, height=figsize_per_param, aspect=1,
+                      despine=False, layout_pad=0.5)
+
+    g.map_lower(_plot_2d_density)
+    g.map_diag(_plot_diagonal)
+    g.map_upper(_plot_upper_corr)
+
+    # ── Tick / label polish ───────────────────────────────────────────────
+    for i in range(n):
+        for j in range(n):
+            ax = g.axes[i, j]
+            if not ax.get_visible():
+                continue
+
+            ax.tick_params(labelsize=TICK_SIZE, length=4, width=0.8)
+            ax.xaxis.set_major_locator(MaxNLocator(nbins=4, prune='both'))
+
+            show_xlabel = (i == n - 1)
+            ax.tick_params(axis='x', labelbottom=show_xlabel)
+            if show_xlabel:
+                for lbl in ax.get_xticklabels():
+                    lbl.set_rotation(45)
+                    lbl.set_ha('right')
+
+            # Left column off-diagonal: show y-axis ticks and labels
+            if j == 0 and i > 0:
+                ax.yaxis.set_major_locator(MaxNLocator(nbins=4, prune='both'))
+                ax.tick_params(axis='y', labelleft=True, labelsize=TICK_SIZE)
+            elif i != j:
+                ax.tick_params(axis='y', labelleft=False)
+
+    # ── Axis (parameter) labels along the diagonal ───────────────────────
+    for i, lbl in enumerate(labels):
+        diag_ax = g.axes[i, i]
+        diag_ax.set_title(lbl, fontsize=LABEL_SIZE, pad=4,
+                          fontweight='semibold', color='white',
+                          bbox=dict(boxstyle='round,pad=0.25',
+                                    facecolor='#2c3e50', alpha=0.85,
+                                    linewidth=0))
+
+    # ── Shared density colorbar (lower-triangle scale) ────────────────────
+    g.figure.subplots_adjust(hspace=0.12, wspace=0.12, bottom=0.10)
+    if _density_artist[0] is not None:
+        cbar_ax = g.figure.add_axes([0.12, 0.02, 0.45, 0.018])
+        cb = g.figure.colorbar(_density_artist[0], cax=cbar_ax,
+                               orientation='horizontal')
+        cb.set_label('∝ √(density)', fontsize=9)
+        cb.ax.tick_params(labelsize=8)
+
+    g.figure.suptitle(
+        f'Parameter Trade-off Corner Plot   (n = {chains.shape[0]:,} post-burn-in)',
+        fontsize=13, y=1.005, fontweight='bold')
+
+    if figure_folder is not None:
+        g.figure.savefig(f"{figure_folder}/corner_plot.png",
+                         dpi=200, bbox_inches='tight')
+        print(f'  Saved: {figure_folder}/corner_plot.png')
+
+    # plt.show()
+
+
+def plot_corner(samples, burn_in=0, figure_folder=None, model_type='pCDM',
+                nbins=40, smooth=True, figsize_per_param=2.5, priors=None):
+    """
+    Corner plot: lower triangle 2-D density + diagonal marginal histograms.
+    Near-zero-variance parameters are automatically excluded.
+    """
+    fig = _draw_corner(None, samples, burn_in=burn_in, model_type=model_type,
+                       nbins=nbins, smooth=smooth, figsize_per_param=figsize_per_param)
+    if fig is None:
+        return
+    fig.tight_layout(rect=[0, 0, 1, 0.96], pad=1.5, h_pad=0.8, w_pad=0.8)
+
+    if figure_folder is not None:
+        fig.savefig(f"{figure_folder}/corner_plot.png", dpi=200, bbox_inches='tight')
+        print(f'  Saved: {figure_folder}/corner_plot.png')
+
+
+def _draw_corner(fig, samples, burn_in=0, model_type='pCDM', nbins=40, smooth=True,
+                 figsize_per_param=2.5, title=None, title_size=None, max_kde_points=200000):
+    """
+    Draw the corner plot onto `fig` (a Figure or SubFigure). If `fig` is None a
+    new figure is created. Returns the figure, or None if there are < 2 active
+    parameters.
+    """
+    from scipy.ndimage import gaussian_filter
+    from scipy.stats import gaussian_kde
+    from matplotlib.ticker import MaxNLocator
+
+    # ── Data preparation ───────────────────────────────────────────────────
+    all_params = get_param_names(model_type, samples)
+    all_params = [p for p in all_params if p in samples and not p.startswith('ramp_')]
+
+    n_total   = len(samples[all_params[0]])
+    burn_safe = max(0, min(int(burn_in), n_total - 2))
+
+    chains_all = np.column_stack(
+        [np.asarray(samples[p][burn_safe:], dtype=float) for p in all_params]
+    )
+
+    # Exclude parameters that didn't mix (relative std below threshold)
+    stds  = chains_all.std(axis=0)
+    means = np.abs(chains_all.mean(axis=0))
+    active = stds / np.where(means > 0, means, 1.0) > 1e-4
+
+    params = [p for p, a in zip(all_params, active) if a]
+    chains = chains_all[:, active]
+    n      = len(params)
+
+    if n < 2:
+        print('plot_corner: fewer than 2 variable parameters — skipping.')
+        return
+
+    print(f'  plot_corner: {chains.shape[0]:,} post-burn-in samples, {n} active parameters.')
+
+    labels = [p.replace('__', '\n') for p in params]
+
+    # ── Axis ranges — always data-driven, with generous padding ────────────
+    # Use wide percentiles (0.5/99.5) so the tails are visible, then add
+    # extra whitespace so you can judge whether the chain has hit an edge.
+    lo = np.percentile(chains, 0.5,  axis=0)
+    hi = np.percentile(chains, 99.5, axis=0)
+
+    span = np.where((hi - lo) > 0, hi - lo, np.abs(hi) * 0.1 + 1e-9)
+    lo  -= 0.3 * span
+    hi  += 0.3 * span
+
+    # ── Figure ──────────────────────────────────────────────────────────────
+    LABEL_SIZE = max(8, min(12, int(130 / n)))
+    TICK_SIZE  = max(7, min(10, int(110 / n)))
+
+    if fig is None:
+        fig = plt.figure(figsize=(figsize_per_param * n, figsize_per_param * n))
+    axes = fig.subplots(n, n, squeeze=False)
 
     for row in range(n):
         for col in range(n):
             ax = axes[row, col]
 
-            x_data = chains[:, col]   # horizontal = column param
-            y_data = chains[:, row]   # vertical   = row    param
+            if col > row:
+                ax.set_visible(False)
+                continue
 
-            if row == col:
-                # ---- Diagonal: marginal 1-D histogram ---------------
-                ax.hist(x_data, bins=nbins, color=COL_HIST, alpha=0.75,
-                        density=True, range=(lo[col], hi[col]))
-                mean_v = np.mean(x_data)
-                std_v  = np.std(x_data)
-                ax.axvline(mean_v,         color=COL_MEAN, lw=1.5, ls='-')
-                ax.axvline(mean_v - std_v, color=COL_STD,  lw=1.0, ls='--')
-                ax.axvline(mean_v + std_v, color=COL_STD,  lw=1.0, ls='--')
-                ax.set_xlim(lo[col], hi[col])
-                ax.yaxis.set_visible(False)
+            is_diag   = (row == col)
+            is_bottom = (row == n - 1)
 
-            elif row > col:
-                # ---- Lower triangle: 2-D joint density --------------
-                H, xedges, yedges = np.histogram2d(
-                    x_data, y_data, bins=nbins,
-                    range=[[lo[col], hi[col]], [lo[row], hi[row]]])
-                H = H.T   # shape (ny, nx)
+            # ── Diagonal: marginal histogram ──────────────────────────────
+            if is_diag:
+                x_data = chains[:, col]
+                counts, edges = np.histogram(x_data, bins=nbins,
+                                             range=(lo[col], hi[col]))
+                ax.bar(edges[:-1], counts, width=np.diff(edges),
+                       color='#4B9CD3', alpha=0.75, align='edge', linewidth=0)
 
-                if smooth and H.max() > 0:
-                    H = gaussian_filter(H.astype(float), sigma=1.0)
-
-                H_log = np.where(H > 0, np.log1p(H), np.nan)
-                ax.imshow(H_log, origin='lower',
-                          extent=[xedges[0], xedges[-1], yedges[0], yedges[-1]],
-                          aspect='auto', cmap=CMAP_2D, interpolation='nearest')
-
-                # ~1σ and ~2σ contour overlays
+                kde_mode = None
                 try:
-                    valid = H_log[np.isfinite(H_log)]
-                    if len(valid) > 1:
-                        lvls = sorted(set(np.nanpercentile(valid, p) for p in (39, 86)))
-                        ax.contour(H_log, levels=lvls,
-                                   colors='white', linewidths=0.8, alpha=0.6,
-                                   extent=[xedges[0], xedges[-1], yedges[0], yedges[-1]],
-                                   origin='lower')
+                    # KDE cost scales with sample count; a thinned chain gives the same curve
+                    step = max(1, len(x_data) // max_kde_points)
+                    kde_fn = gaussian_kde(x_data[::step], bw_method='scott')
+                    x_kde  = np.linspace(lo[col], hi[col], 400)
+                    y_kde  = kde_fn(x_kde) * len(x_data) * np.diff(edges)[0]
+                    ax.plot(x_kde, y_kde, color='#1a5276', lw=1.5, zorder=4)
+                    kde_mode = x_kde[np.argmax(y_kde)]
                 except Exception:
                     pass
+
+                if kde_mode is not None:
+                    ax.axvline(kde_mode, color='red', lw=1.5, ls='--', zorder=5)
+
+                ax.set_xlim(lo[col], hi[col])
+                ax.set_ylim(0, counts.max() * 1.15)
+                ax.set_title(labels[col], fontsize=LABEL_SIZE,
+                             fontweight='bold', pad=4)
+
+                if col == 0:
+                    ax.set_ylabel('Frequency', fontsize=LABEL_SIZE - 1)
+                    ax.tick_params(axis='y', labelsize=TICK_SIZE)
+                else:
+                    ax.tick_params(axis='y', labelleft=False)
+
+            # ── Lower triangle: 2-D density ───────────────────────────────
+            else:
+                x_data = chains[:, col]
+                y_data = chains[:, row]
+
+                H, _, _ = np.histogram2d(
+                    x_data, y_data, bins=nbins,
+                    range=[[lo[col], hi[col]], [lo[row], hi[row]]]
+                )
+                H = H.T
+                if smooth:
+                    H = gaussian_filter(H.astype(float), sigma=max(0.5, nbins / 40.0))
+
+                xi = np.linspace(lo[col], hi[col], H.shape[1])
+                yi = np.linspace(lo[row], hi[row], H.shape[0])
+                ax.contourf(xi, yi, np.sqrt(H), levels=25, cmap='viridis', extend='both')
 
                 ax.set_xlim(lo[col], hi[col])
                 ax.set_ylim(lo[row], hi[row])
 
-            else:
-                # ---- Upper triangle: blank --------------------------
-                ax.set_visible(False)
-                continue   # skip all tick / label logic below
+                if col == 0:
+                    ax.set_ylabel(labels[row], fontsize=LABEL_SIZE - 1)
+                    ax.yaxis.set_major_locator(MaxNLocator(nbins=4, prune='both'))
+                    ax.tick_params(axis='y', labelsize=TICK_SIZE)
+                else:
+                    ax.tick_params(axis='y', labelleft=False)
 
-            # ---- Tick label visibility (edge cells only) ------------
-            # X ticks: only on the bottom row
-            if row < n - 1:
+            # ── X-axis ────────────────────────────────────────────────────
+            ax.xaxis.set_major_locator(MaxNLocator(nbins=4, prune='both'))
+
+            if is_bottom:
+                ax.set_xlabel(labels[col], fontsize=LABEL_SIZE - 1)
+                ax.tick_params(axis='x', labelsize=TICK_SIZE, labelbottom=True)
+                plt.setp(ax.get_xticklabels(), rotation=45, ha='right',
+                         rotation_mode='anchor')
+            else:
                 ax.tick_params(axis='x', labelbottom=False)
-            else:
-                ax.set_xlabel(labels[col], fontsize=8)
 
-            # Y ticks: only on the left column, and only for off-diagonal
-            if col == 0 and row > 0:
-                ax.set_ylabel(labels[row], fontsize=8)
-            else:
-                ax.tick_params(axis='y', labelleft=False)
-
-            ax.tick_params(labelsize=6)
-
-    fig.suptitle(
-        f'Posterior Corner Plot  (post burn-in,  n = {chains.shape[0]:,})',
-        fontsize=11)
-    plt.tight_layout()
-    fig.subplots_adjust(hspace=0.05, wspace=0.05, top=0.95)
-
-    if figure_folder is not None:
-        plt.savefig(f"{figure_folder}/corner_plot.png", dpi=200, bbox_inches='tight')
-        print(f'  Saved: {figure_folder}/corner_plot.png')
-
-    plt.show()
+    # ── Title and layout ─────────────────────────────────────────────────────
+    if title is None:
+        title = f'Parameter Posterior Corner Plot   (n = {chains.shape[0]:,} post-burn-in)'
+    fig.suptitle(title, fontsize=title_size or max(10, LABEL_SIZE + 1), fontweight='bold')
+    return fig
 
 
 def plot_model_components(samples, u_los_obs, X_obs, Y_obs,
@@ -917,47 +1332,11 @@ def plot_model_components(samples, u_los_obs, X_obs, Y_obs,
             model_name = label
             p = map_params
 
-        if 'pcdm' in model_name:
-            ue, un, uv = pCDM_fast.pCDM(
-                X_use, Y_use,
-                p['X0'], p['Y0'], p['depth'],
-                p.get('omegaX', 0), p.get('omegaY', 0), p.get('omegaZ', 0),
-                p.get('DVx', 0), p.get('DVy', 0), p.get('DVz', 0), 0.25)
+        if model_name in MODEL_REGISTRY:
+            ue, un, uv = forward_from_registry(model_name, X_use, Y_use, p)
             contributions[label] = _to_los(ue, un, uv)
-            annot_info[label] = {'type': 'pcdm',
-                                 'X0': p['X0'], 'Y0': p['Y0'], 'depth': p['depth']}
-
-        elif 'okada' in model_name:
-            ue, un, uv = okada_fast.disloc3d3(
-                X_use, Y_use,
-                xoff=p['X0'], yoff=p['Y0'], depth=p['depth'],
-                length=p.get('length', 10000), width=p.get('width', 8000),
-                slip=p.get('slip', 0), opening=p.get('opening', 0),
-                strike=p.get('strike', 0), dip=p.get('dip', 45),
-                rake=p.get('rake', 90), nu=0.25)
-            contributions[label] = _to_los(ue, un, uv)
-            annot_info[label] = {'type': 'okada',
-                                 'X0': p['X0'], 'Y0': p['Y0'], 'depth': p['depth'],
-                                 'length': p.get('length', 10000),
-                                 'width':  p.get('width', 8000),
-                                 'strike': p.get('strike', 0),
-                                 'dip':    p.get('dip', 45)}
-
-        elif 'une' in model_name:
-            uv, ue, un = UNE_three.model(
-                X_use, Y_use,
-                depth=p['depth'], yield_kt=p['yield_kt'],
-                dv_factor=p.get('dv_factor', 0.1),
-                chimney_amp=p.get('chimney_amp', 0.15),
-                chimney_height_fac=10, chimney_peck_k=0.35,
-                compact_amp=p.get('compact_amp', 0.05),
-                anelastic_fac=5,
-                x0=p.get('X0', 0), y0=p.get('Y0', 0),
-                nu=0.25, mu=30e9)
-            contributions[label] = _to_los(ue, un, uv)
-            annot_info[label] = {'type': 'une',
-                                 'X0': p.get('X0', 0), 'Y0': p.get('Y0', 0),
-                                 'depth': p['depth']}
+            # Store all model params so annotation helpers (_draw_okada etc.) can access them
+            annot_info[label] = {**p, 'type': model_name}
         else:
             contributions[label] = np.zeros_like(X_use, float)
             annot_info[label] = {'type': 'unknown', 'X0': 0.0, 'Y0': 0.0}
@@ -1101,5 +1480,375 @@ def plot_model_components(samples, u_los_obs, X_obs, Y_obs,
                     dpi=200, bbox_inches='tight')
         print(f'  Saved: {figure_folder}/model_components_LOS.png')
 
-    plt.show()
+    # plt.show()
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Report figure: corner plot + data fit + (multi-model) component panels
+# ─────────────────────────────────────────────────────────────────────────────
+
+_UNIT_SCALE = {'m': 1.0, 'cm': 1e2, 'mm': 1e3}
+
+
+def _split_map_models(map_params, model_type):
+    """Return [(label, model_name, params)] for single or prefixed multi-model dicts."""
+    if any('__' in k for k in map_params):
+        labels = sorted({k.split('__')[0] for k in map_params if '__' in k})
+        return [(lab, lab.split('_')[0].lower(),
+                 {k.split('__')[1]: v for k, v in map_params.items() if k.startswith(lab + '__')})
+                for lab in labels]
+    m = model_type if isinstance(model_type, str) else list(model_type)[0]
+    return [(m.lower(), m.lower(), map_params)]
+
+
+def _ramp_for_ifg(p, X, Y, j, n_ifgs):
+    """MAP ramp/offset at (X, Y) for IFG j; handles 'ramp_c' and 'ramp_c_{j}' naming."""
+    sfx = f'_{j}' if f'ramp_c_{j}' in p else ''
+    if not sfx and n_ifgs > 1 and 'ramp_c' not in p:
+        return np.zeros(len(X))
+    return (p.get(f'ramp_c{sfx}', 0.0)
+            + p.get(f'ramp_a{sfx}', 0.0) * X
+            + p.get(f'ramp_b{sfx}', 0.0) * Y) * np.ones(len(X))
+
+
+def _pixel_grid(x, y, max_cells=400):
+    """Nearest-neighbour index grid for (possibly scattered) points, like GMT xyz2grd.
+
+    Returns (idx, valid, extent): idx maps each cell to its nearest data point and
+    valid masks cells further than ~one sample spacing from any point.
+    """
+    from scipy.spatial import cKDTree
+    tree = cKDTree(np.column_stack([x, y]))
+    spacing = np.median(tree.query(np.column_stack([x, y]), k=2)[0][:, 1])
+    spacing = max(spacing, max(np.ptp(x), np.ptp(y)) / max_cells)
+    xi = np.arange(x.min(), x.max() + spacing, spacing)
+    yi = np.arange(y.min(), y.max() + spacing, spacing)
+    Xi, Yi = np.meshgrid(xi, yi)
+    d, idx = tree.query(np.column_stack([Xi.ravel(), Yi.ravel()]))
+    extent = (xi[0] - spacing / 2, xi[-1] + spacing / 2, yi[0] - spacing / 2, yi[-1] + spacing / 2)
+    return idx.reshape(Xi.shape), (d <= 1.5 * spacing).reshape(Xi.shape), extent
+
+
+def _draw_source_marker(ax, name, p, color='black', km=True):
+    """Overlay MAP source geometry (Okada outline, or a centre marker otherwise)."""
+    s = 1e-3 if km else 1.0
+    x0, y0 = p.get('X0'), p.get('Y0')
+    if x0 is None or y0 is None:
+        return
+    if name == 'okada' and all(k in p for k in ('strike', 'dip', 'length', 'width')):
+        # (X0, Y0) is the fault centroid (see okada_model.disloc3d3); the fault dips
+        # to the right of strike, so the shallow edge sits up-dip of the centroid.
+        sk, dp = np.radians(p['strike']), np.radians(p['dip'])
+        se, sn = np.sin(sk), np.cos(sk)           # along-strike
+        de, dn = np.cos(sk), -np.sin(sk)          # horizontal down-dip
+        hw, L = 0.5 * p['width'] * np.cos(dp), 0.5 * p['length']
+        top = np.array([[x0 - de*hw - se*L, y0 - dn*hw - sn*L],
+                        [x0 - de*hw + se*L, y0 - dn*hw + sn*L]])
+        bot = np.array([[x0 + de*hw + se*L, y0 + dn*hw + sn*L],
+                        [x0 + de*hw - se*L, y0 + dn*hw - sn*L]])
+        poly = np.vstack([top, bot, top[:1]]) * s
+        ax.plot(poly[:, 0], poly[:, 1], '-', color=color, lw=1.0, zorder=10)
+        ax.plot(top[:, 0] * s, top[:, 1] * s, '-', color=color, lw=2.8, zorder=11,
+                solid_capstyle='butt')
+        ax.plot(x0 * s, y0 * s, '+', color=color, ms=7, mew=1.5, zorder=12)
+    else:
+        marker = '*' if name == 'pcdm' else 'o' if name.startswith('une') else 'X'
+        ax.plot(x0 * s, y0 * s, marker, mfc='none' if marker == 'o' else color,
+                mec=color, ms=9, mew=1.5, zorder=12)
+
+
+def plot_report_figure(samples, u_los_obs, X_obs, Y_obs, incidence_angle, heading,
+                       log_likelihood_trace, burn_in=0, figure_folder=None,
+                       model_type='pCDM', ifg_dates=None, include_components='auto', include_corner=True,
+                       units='mm', show_sources=True, wrapped=False, wavelength=0.0555,
+                       fig_width=14.0, filename='report_figure.png', dpi=300):
+    """
+    Single summary figure for write-ups, stacking:
+
+      (a) posterior corner plot (ramp parameters excluded, as in plot_corner),
+      (b) data fit: observed | MAP model (+ramp) | residual, one row per IFG,
+      (c) model components (multi-model runs only): each source's MAP LOS
+          contribution plus their sum, on a shared colour scale.
+
+    Parameters
+    ----------
+    include_components : 'auto' | bool
+        'auto' draws row (c) only when more than one source model was fitted.
+    units : 'm' | 'cm' | 'mm'
+        Displacement units for the colour bars. Map axes are always in km.
+    show_sources : bool
+        Overlay MAP source locations / Okada fault outlines on the map panels.
+    wrapped : bool
+        Add a re-wrapped (mod wavelength/2) row under each data-fit row, styled
+        after GBIS_output_clean.plot_mod_los_res.
+    """
+    import matplotlib.colors as mcolors
+    from matplotlib.ticker import MaxNLocator
+
+    scale = _UNIT_SCALE[units]
+    try:
+        from cmcrameri import cm as _cmc
+        cmap, cmap_wrap = _cmc.vik, _cmc.romaO
+    except ImportError:
+        cmap, cmap_wrap = 'RdBu_r', 'twilight'
+    wrap_len = wavelength / 2
+
+    # ── MAP parameters ───────────────────────────────────────────────────
+    ll = np.asarray(log_likelihood_trace[burn_in:])
+    best = int(np.argmax(ll))
+    map_params = {k: float(np.asarray(v[burn_in:])[best]) for k, v in samples.items()}
+    models = _split_map_models(map_params, model_type)
+
+    # ── Normalise observations to per-IFG lists ─────────────────────────
+    multi_ifg = (isinstance(u_los_obs, (list, tuple))
+                 or (isinstance(u_los_obs, np.ndarray) and u_los_obs.dtype == object)) \
+        and len(u_los_obs) > 0 and hasattr(u_los_obs[0], '__iter__')
+    if multi_ifg:
+        n_ifgs = len(u_los_obs)
+
+        def _per_ifg(a):
+            if isinstance(a, (list, tuple)) or (isinstance(a, np.ndarray) and a.dtype == object):
+                return [np.asarray(a[j], float) for j in range(n_ifgs)]
+            return [np.asarray(a, float)] * n_ifgs
+        U, XS, YS = _per_ifg(u_los_obs), _per_ifg(X_obs), _per_ifg(Y_obs)
+        INC, HEAD = _per_ifg(incidence_angle), _per_ifg(heading)
+    else:
+        n_ifgs = 1
+        U, XS, YS = [np.asarray(u_los_obs, float)], [np.asarray(X_obs, float)], [np.asarray(Y_obs, float)]
+        INC, HEAD = [np.asarray(incidence_angle, float)], [np.asarray(heading, float)]
+    if isinstance(ifg_dates, str):
+        ifg_dates = [ifg_dates]
+    dates = list(ifg_dates) if ifg_dates is not None else [None] * n_ifgs
+
+    def _los(ue, un, uv, inc, head):
+        inc_r, head_r = np.radians(inc), np.radians(head)
+        return -(np.asarray(ue, float) * np.sin(inc_r) * np.cos(head_r)
+                 - np.asarray(un, float) * np.sin(inc_r) * np.sin(head_r)
+                 - np.asarray(uv, float) * np.cos(inc_r))
+
+    # ── Forward models per IFG ───────────────────────────────────────────
+    fits = []
+    for j in range(n_ifgs):
+        X, Y = XS[j], YS[j]
+        comps = {}
+        for label, name, p in models:
+            try:
+                comps[label] = _los(*forward_from_registry(name, X, Y, p), INC[j], HEAD[j])
+            except ValueError as exc:
+                print(f'  plot_report_figure: skipping {label} ({exc})')
+                comps[label] = np.zeros_like(X)
+        source = sum(comps.values())
+        model = source + _ramp_for_ifg(map_params, X, Y, j, n_ifgs)
+        fits.append(dict(X=X, Y=Y, grid=_pixel_grid(X, Y), obs=U[j],
+                         model=model, res=U[j] - model, comps=comps, source=source))
+
+    if include_components == 'auto':
+        include_components = len(models) > 1
+
+    # ── Layout ────────────────────────────────────────────────────────────
+    corner_params = [p for p in get_param_names(model_type, samples)
+                     if p in samples and not p.startswith('ramp_')]
+    n_corner = max(2, len(corner_params))
+    aspect = np.ptp(fits[0]['Y']) / max(np.ptp(fits[0]['X']), 1e-9)
+
+    def _row_h(ncols):
+        # panel height from width & data aspect, plus room for titles/labels
+        return (fig_width * 0.8 / ncols) * aspect + 1.0
+
+    heights = [fig_width * min(1.3, 0.1 * n_corner + 0.1)] if include_corner else []
+    heights += [_row_h(3) * (2 if wrapped else 1)] * n_ifgs
+    if include_components:
+        heights.append(_row_h(len(models) + 1))
+
+    fig = plt.figure(figsize=(fig_width, sum(heights)), layout='constrained')
+    subfigs = np.atleast_1d(fig.subfigures(len(heights), 1, height_ratios=heights, hspace=0.02))
+
+    letters = iter('abcdefghijklmnopqrstuvwxyz')
+    n_post = len(ll)
+
+    def _block_title(sf, text):
+        # block label only; `text` is kept at the call sites as a description
+        sf.suptitle(f'({next(letters)})', x=0.0, ha='left',
+                    fontsize=13, fontweight='bold')
+
+    # (a) corner
+    off = 1 if include_corner else 0
+    if include_corner:
+        _draw_corner(subfigs[0], samples, burn_in=burn_in, model_type=model_type,
+                     figsize_per_param=fig_width / n_corner, title='')
+        _block_title(subfigs[0], f'Posterior distributions  (n = {n_post:,} post-burn-in samples; '
+                                 f'red dashed = marginal mode)')
+
+    def _style_map(ax, title, ylabel=True):
+        ax.set_title(title, fontsize=16)
+        ax.set_aspect('equal')
+        ax.set_xlabel('Easting (km)', fontsize=9)
+        if ylabel:
+            ax.set_ylabel('Northing (km)', fontsize=9)
+        else:
+            ax.tick_params(labelleft=False)
+        ax.tick_params(labelsize=8)
+        ax.xaxis.set_major_locator(MaxNLocator(5))
+        ax.yaxis.set_major_locator(MaxNLocator(5))
+
+    def _tri_plot(ax, f, values, norm, cm=None):
+        idx, valid, ext = f['grid']
+        img = np.where(valid, np.asarray(values, float)[idx], np.nan)
+        ext_km = [e * 1e-3 for e in ext]
+        im = ax.imshow(img, origin='lower', extent=ext_km, cmap=cm or cmap, norm=norm,
+                       interpolation='nearest', rasterized=True)
+        ax.set_xlim(ext_km[:2])
+        ax.set_ylim(ext_km[2:])
+        return im
+
+    def _sym_norm(*arrays, pct=99.5):
+        v = np.concatenate([np.abs(a[np.isfinite(a)]) for a in arrays])
+        vmax = np.percentile(v, pct) if v.size else 1.0
+        return mcolors.Normalize(-(vmax or 1.0), vmax or 1.0)
+
+    def _overlay(ax, colors=None):
+        if not show_sources:
+            return
+        for k, (label, name, p) in enumerate(models):
+            _draw_source_marker(ax, name, p, color=(colors[k] if colors else 'black'))
+
+    # (b) data fit rows
+    # Same layout as plot_mod_los_res: Data | Model | Residual, all on the data's
+    # colour range, with the re-wrapped versions underneath.
+    keys = ('obs', 'model', 'res')
+    for j, f in enumerate(fits):
+        sf = subfigs[off + j]
+        axes = np.atleast_2d(sf.subplots(2 if wrapped else 1, 3, sharex=True, sharey=True))
+        vmax = np.nanmax(np.abs(f['obs'])) * scale
+        norm = mcolors.Normalize(-vmax, vmax)
+        for c, (ax, key, title) in enumerate(zip(axes[0], keys, ('Data', 'Model', 'Residual'))):
+            im = _tri_plot(ax, f, f[key] * scale, norm)
+            _style_map(ax, title, ylabel=(c == 0))
+            _overlay(ax)
+        rms = np.sqrt(np.nanmean(f['res'] ** 2)) * scale
+        axes[0, 2].text(0.02, 0.02, f'RMS = {rms:.2f} {units}', transform=axes[0, 2].transAxes,
+                        fontsize=9, va='bottom', bbox=dict(fc='white', ec='none', alpha=0.8))
+        sf.colorbar(im, ax=axes[0], shrink=0.9, extend='both', pad=0.01,
+                    label=f'LOS displacement ({units})')
+        if wrapped:
+            wnorm = mcolors.Normalize(0, wrap_len * scale)
+            for c, (ax, key) in enumerate(zip(axes[1], keys)):
+                im = _tri_plot(ax, f, np.mod(f[key], wrap_len) * scale, wnorm, cm=cmap_wrap)
+                _style_map(ax, '', ylabel=(c == 0))
+                _overlay(ax)
+            sf.colorbar(im, ax=axes[1], shrink=0.9, pad=0.01,
+                        label=f'Wrapped LOS ({units}, mod λ/2)')
+        tag = dates[j] if j < len(dates) and dates[j] else (f'IFG {j + 1}' if n_ifgs > 1 else '')
+        _block_title(sf, 'Data fit' + (f' — {tag}' if tag else '')
+                     + ('  (model includes fitted ramp)' if any(k.startswith('ramp_') for k in map_params) else ''))
+
+    # (c) components (first IFG geometry)
+    if include_components:
+        f = fits[0]
+        sf = subfigs[-1]
+        axes = np.atleast_1d(sf.subplots(1, len(models) + 1, sharex=True, sharey=True))
+        # Same scale as the data panels (b), unclipped, so the sources can be
+        # compared with each other and with the data at a glance.
+        vmax = np.nanmax(np.abs(f['obs'])) * scale
+        norm = mcolors.Normalize(-vmax, vmax)
+        colors = ['black', 'darkorange', 'green', 'purple']
+        for k, (label, name, p) in enumerate(models):
+            im = _tri_plot(axes[k], f, f['comps'][label] * scale, norm)
+            _style_map(axes[k], label.replace('_', ' ').title(), ylabel=(k == 0))
+            if show_sources:
+                _draw_source_marker(axes[k], name, p, color='black')
+        im = _tri_plot(axes[-1], f, f['source'] * scale, norm)
+        _style_map(axes[-1], 'Sum of sources (no ramp)', ylabel=False)
+        _overlay(axes[-1], colors=colors[:len(models)] if len(models) <= len(colors) else None)
+        sf.colorbar(im, ax=axes, shrink=0.9, pad=0.01,
+                    label=f'LOS displacement ({units})')
+        _block_title(sf, 'MAP source contributions'
+                     + (f' — {dates[0]}' if n_ifgs > 1 and dates[0] else (' — IFG 1' if n_ifgs > 1 else '')))
+
+    if figure_folder is not None:
+        out = os.path.join(figure_folder, filename)
+        fig.savefig(out, dpi=dpi, bbox_inches='tight')
+        print(f'  Saved: {out}')
+    plt.close(fig)
+
+
+def test_corner_plot():
+    """
+    Test function to visualize corner plot with synthetic MCMC samples.
+    Generates correlated posterior samples and displays the corner plot.
+    """
+    print("Generating synthetic MCMC samples for corner plot test...")
+    
+    # Define parameter names and priors (Mogi-like model)
+    param_names = ['X0', 'Y0', 'depth', 'DV']
+    n_params = len(param_names)
+    n_samples = 5000
+    
+    # Define priors
+    priors = {
+        'X0': (-1500, 1500),
+        'Y0': (-1500, 1500),
+        'depth': (100, 5000),
+        'DV': (-1e8, -1e4)
+    }
+    
+    # Create synthetic posterior with correlations
+    # True values (around which posterior is centered)
+    true_params = np.array([100, 50, 800, -5e7])
+    
+    # Covariance matrix with some correlations
+    # Depth and DV are correlated, X0 and Y0 slightly correlated
+    cov = np.array([
+        [50000,     5000,    0,      0],      # X0
+        [5000,      50000,   0,      0],      # Y0
+        [0,         0,       300000, 1e8],    # depth
+        [0,         0,       1e8,    5e15]    # DV
+    ])
+    
+    # Generate samples from multivariate normal
+    samples_array = np.random.multivariate_normal(true_params, cov, n_samples)
+    
+    # Convert to prior bounds to make it more realistic (clip to priors)
+    for i, param in enumerate(param_names):
+        lo, hi = priors[param]
+        samples_array[:, i] = np.clip(samples_array[:, i], lo, hi)
+    
+    # Create samples dict
+    samples = {param: samples_array[:, i].tolist() for i, param in enumerate(param_names)}
+    
+    # Generate test figure folder
+    test_folder = "test_corner_plot"
+    if not os.path.exists(test_folder):
+        os.makedirs(test_folder)
+    
+    print(f"Sample statistics:")
+    for i, param in enumerate(param_names):
+        mean = np.mean(samples_array[:, i])
+        std = np.std(samples_array[:, i])
+        print(f"  {param}: mean={mean:.2e}, std={std:.2e}, "
+              f"prior=[{priors[param][0]:.2e}, {priors[param][1]:.2e}]")
+    
+    # Plot corner with priors
+    print(f"\nGenerating corner plot with priors...")
+    plot_corner(samples, burn_in=0, figure_folder=test_folder, model_type='pCDM',
+                nbins=40, smooth=True, figsize_per_param=2.0, priors=priors)
+    
+    # Also generate without priors for comparison
+    print(f"Generating corner plot without priors (for comparison)...")
+    test_folder_no_priors = "test_corner_plot_no_priors"
+    if not os.path.exists(test_folder_no_priors):
+        os.makedirs(test_folder_no_priors)
+    plot_corner(samples, burn_in=0, figure_folder=test_folder_no_priors, model_type='pCDM',
+                nbins=40, smooth=True, figsize_per_param=2.0, priors=None)
+    
+    print(f"\nTest plots saved to:")
+    print(f"  {test_folder}/corner_plot.png (with prior bounds)")
+    print(f"  {test_folder_no_priors}/corner_plot.png (without prior bounds)")
+    print("\nYou can open these files to see the corner plot visualization.")
+
+
+if __name__ == "__main__":
+    # Run test if this file is executed directly
+    test_corner_plot()
+
 

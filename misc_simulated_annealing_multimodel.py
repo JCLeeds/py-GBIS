@@ -3,9 +3,7 @@ from mpl_toolkits.mplot3d import Axes3D
 from scipy.stats import multivariate_normal
 from scipy.stats import norm
 from scipy.interpolate import griddata
-import pCDM_model as pCDM_fast
-import okada_model as okada_fast
-import UNE_three_component as UNE_three
+from model_registry import MODEL_REGISTRY, forward_from_registry
 
 import matplotlib.pyplot as plt
 import os 
@@ -153,7 +151,45 @@ def simulated_annealing_optimization(u_los_obs, X_obs, Y_obs, incidence_angle, h
 
     flat_bounds, flat_step_sizes, flat_start, labels = _build_flat_space()
 
+    # Pre-convert observation coordinates to float64 arrays ONCE (avoid per-iteration overhead)
+    X_obs_f64 = np.asarray(X_obs, dtype=np.float64)
+    Y_obs_f64 = np.asarray(Y_obs, dtype=np.float64)
+
+    # Cache forward function references to avoid dict + .lower() lookup every iteration
+    if single_model_mode:
+        _cached_fwd = MODEL_REGISTRY[model_list[0]]['forward']
+    else:
+        _cached_fwd_list = [MODEL_REGISTRY[m]['forward'] if m in MODEL_REGISTRY else None
+                           for m in model_list]
+
     # Energy function works on flattened parameter dict
+    def _model_prior_ok(flat_params):
+        """Reject states the MODEL's own prior rejects.
+
+        SA otherwise honours only the box bounds, so it can return a state
+        that satisfies every box yet violates a physical condition the model
+        imposes (for the UNE stack models: eta r_c < depth, and the closing
+        volume capped by the pore space the column holds).  MCMC then starts
+        at log-posterior -inf and aborts.  Roughly a quarter of the box is
+        infeasible for those models, so this is not a rare corner.
+        """
+        try:
+            if single_model_mode:
+                fn = MODEL_REGISTRY.get(model_list[0], {}).get('prior')
+                return fn is None or np.isfinite(fn(flat_params))
+            for idx, label in enumerate(labels):
+                fn = MODEL_REGISTRY.get(model_list[idx], {}).get('prior')
+                if fn is None:
+                    continue
+                pre = label + '__'
+                sub = {k[len(pre):]: v for k, v in flat_params.items()
+                       if k.startswith(pre)}
+                if sub and not np.isfinite(fn(sub)):
+                    return False
+            return True
+        except Exception:
+            return False
+
     def energy_function_flat(flat_params):
         try:
             # Check bounds
@@ -162,44 +198,14 @@ def simulated_annealing_optimization(u_los_obs, X_obs, Y_obs, incidence_angle, h
                     return np.inf
                 if not (lower <= flat_params[key] <= upper):
                     return np.inf
+            if not _model_prior_ok(flat_params):
+                return np.inf
 
             # Reconstruct per-model dicts if joint
             if single_model_mode:
                 pdict = flat_params
-                # run single forward model
-                if model_list[0] == 'pcdm':
-                    ue, un, uv = pCDM_fast.pCDM(
-                        np.asarray(X_obs, dtype=float), np.asarray(Y_obs, dtype=float),
-                        float(pdict['X0']), float(pdict['Y0']), float(pdict['depth']),
-                        float(pdict.get('omegaX', 0)), float(pdict.get('omegaY', 0)), float(pdict.get('omegaZ', 0)),
-                        float(pdict.get('DVx', 0)), float(pdict.get('DVy', 0)), float(pdict.get('DVz', 0)), 0.25
-                    )
-                elif model_list[0] == 'okada':
-                    ue, un, uv = okada_fast.disloc3d3(
-                        np.asarray(X_obs, dtype=float), np.asarray(Y_obs, dtype=float),
-                        xoff=float(pdict['X0']), yoff=float(pdict['Y0']), depth=float(pdict['depth']),
-                        length=float(pdict.get('length', 0)), width=float(pdict.get('width', 0)),
-                        slip=float(pdict.get('slip', 0)), opening=float(pdict.get('opening', 0)),
-                        strike=float(pdict.get('strike', 0)), dip=float(pdict.get('dip', 0)), rake=float(pdict.get('rake', 0)), nu=0.25
-                    )
-                elif model_list[0] == 'une':
-                    uv, ue, un = UNE_three.model(
-                        np.asarray(X_obs, dtype=float), np.asarray(Y_obs, dtype=float),
-                        depth=float(pdict['depth']), yield_kt=float(pdict['yield_kt']),
-                        dv_factor=float(pdict.get('dv_factor', 0.1)),
-                        chimney_amp=float(pdict.get('chimney_amp', 0.15)),
-                        chimney_height_fac=10, chimney_peck_k=0.35,
-                        compact_amp=float(pdict.get('compact_amp', 0.05)),
-                        anelastic_fac=5,
-                        x0=float(pdict.get('X0', 0)), y0=float(pdict.get('Y0', 0)),
-                        nu=0.25, mu=30e9
-                    )
-                else:
-                    # fallback: try pcdm
-                    ue, un, uv = pCDM_fast.pCDM(np.asarray(X_obs, dtype=float), np.asarray(Y_obs, dtype=float),
-                                                float(pdict.get('X0', 0)), float(pdict.get('Y0', 0)), float(pdict.get('depth', 0)),
-                                                float(pdict.get('omegaX', 0)), float(pdict.get('omegaY', 0)), float(pdict.get('omegaZ', 0)),
-                                                float(pdict.get('DVx', 0)), float(pdict.get('DVy', 0)), float(pdict.get('DVz', 0)), 0.25)
+                # run single forward model via cached function
+                ue, un, uv = _cached_fwd(X_obs_f64, Y_obs_f64, pdict)
                 ue = np.asarray(ue, dtype=float)
                 un = np.asarray(un, dtype=float)
                 uv = np.asarray(uv, dtype=float)
@@ -219,28 +225,9 @@ def simulated_annealing_optimization(u_los_obs, X_obs, Y_obs, incidence_angle, h
                             orig_k = flat_k.split('__', 1)[1]
                             pdict[orig_k] = val
                     mm = m
-                    if 'pcdm' in mm:
-                        ue_i, un_i, uv_i = pCDM_fast.pCDM(np.asarray(X_obs, dtype=float), np.asarray(Y_obs, dtype=float),
-                                                         pdict.get('X0', 0), pdict.get('Y0', 0), pdict.get('depth', 0),
-                                                         pdict.get('omegaX', 0), pdict.get('omegaY', 0), pdict.get('omegaZ', 0),
-                                                         pdict.get('DVx', 0), pdict.get('DVy', 0), pdict.get('DVz', 0), 0.25)
-                    elif 'okada' in mm:
-                        ue_i, un_i, uv_i = okada_fast.disloc3d3(np.asarray(X_obs, dtype=float), np.asarray(Y_obs, dtype=float),
-                                                               xoff=pdict.get('X0'), yoff=pdict.get('Y0'), depth=pdict.get('depth'),
-                                                               length=pdict.get('length'), width=pdict.get('width'),
-                                                               slip=pdict.get('slip', 0), opening=pdict.get('opening', 0),
-                                                               strike=pdict.get('strike', 0), dip=pdict.get('dip', 0), rake=pdict.get('rake', 0), nu=0.25)
-                    elif 'une' in mm:
-                        uv_i, ue_i, un_i = UNE_three.model(
-                            np.asarray(X_obs, dtype=float), np.asarray(Y_obs, dtype=float),
-                            depth=pdict.get('depth', 1000), yield_kt=pdict.get('yield_kt', 1.0),
-                            dv_factor=pdict.get('dv_factor', 0.1),
-                            chimney_amp=pdict.get('chimney_amp', 0.15),
-                            chimney_height_fac=10, chimney_peck_k=0.35,
-                            compact_amp=pdict.get('compact_amp', 0.05),
-                            anelastic_fac=5,
-                            x0=pdict.get('X0', 0), y0=pdict.get('Y0', 0),
-                            nu=0.25, mu=30e9)
+                    fwd_fn = _cached_fwd_list[idx]
+                    if fwd_fn is not None:
+                        ue_i, un_i, uv_i = fwd_fn(X_obs_f64, Y_obs_f64, pdict)
                     else:
                         # unsupported -> zero contribution
                         ue_i = np.zeros(len(X_obs))
@@ -283,6 +270,8 @@ def simulated_annealing_optimization(u_los_obs, X_obs, Y_obs, incidence_angle, h
             for key, (lower, upper) in bounds.items():
                 if not (lower <= params[key] <= upper):
                     return np.inf
+            if not _model_prior_ok(params):
+                return np.inf
                 
             # dvs = [params['DVx'], params['DVy'], params['DVz']]
             # signs = [np.sign(dv) for dv in dvs if dv != 0]
@@ -298,70 +287,8 @@ def simulated_annealing_optimization(u_los_obs, X_obs, Y_obs, incidence_angle, h
                                      for key, value in params.items()])
                 print(f"  Testing params: {param_str}")
 
-            # Forward model - ensure inputs are proper types
-            X_obs_arr = np.asarray(X_obs, dtype=float)
-            Y_obs_arr = np.asarray(Y_obs, dtype=float)
-            
-
-            if model_type.lower() == 'pcdm':
-                ue, un, uv = pCDM_fast.pCDM(
-                    X_obs_arr, Y_obs_arr, 
-                    float(params['X0']), float(params['Y0']), float(params['depth']),
-                    float(params['omegaX']), float(params['omegaY']), float(params['omegaZ']),
-                    float(params['DVx']), float(params['DVy']), float(params['DVz']), 
-                    0.25
-                )
-            elif model_type.lower() == 'mctigue':
-                # ue, un, uv = pCDM_fast.McTigue(
-                #     X_obs_arr, Y_obs_arr, 
-                #     float(params['X0']), float(params['Y0']), float(params['depth']),
-                #     float(params['a']), float(params['c']),
-                #     float(params['DV']),
-                #     0.25
-                # )
-                pass
-            elif model_type.lower() == 'mogi':
-                # ue, un, uv = pCDM_fast.Mogi(
-                #     X_obs_arr, Y_obs_arr, 
-                #     float(params['X0']), float(params['Y0']), float(params['depth']),
-                #     float(params['DV']),
-                #     0.25
-                # )
-                pass
-            elif model_type.lower() == 'yang':
-                # ue, un, uv = pCDM_fast.Yang(
-                #     X_obs_arr, Y_obs_arr, 
-                #     float(params['X0']), float(params['Y0']), float(params['depth']),
-                #     float(params['a']), float(params['c']),
-                #     float(params['DV']),
-                #     0.25
-                # )
-                pass
-            elif model_type.lower() == 'okada':
-                
-                ue, un, uv = okada_fast.disloc3d3(
-                    X_obs_arr, Y_obs_arr, 
-                    xoff=float(params['X0']), yoff=float(params['Y0']), depth=float(params['depth']),
-                    length=float(params['length']), width=float(params['width']),
-                    strike=float(params['strike']), dip=float(params['dip']),
-                    rake=float(params['rake']),
-                    slip=float(params['slip']),
-                    opening=float(params['opening']),
-                    nu=0.25
-                )
-                pass
-            elif model_type.lower() == 'une':
-                uv, ue, un = UNE_three.model(
-                    X_obs_arr, Y_obs_arr,
-                    depth=float(params['depth']), yield_kt=float(params['yield_kt']),
-                    dv_factor=float(params['dv_factor']),
-                    chimney_amp=float(params['chimney_amp']),
-                    chimney_height_fac=10, chimney_peck_k=0.35,
-                    compact_amp=float(params['compact_amp']),
-                    anelastic_fac=5,
-                    x0=float(params['X0']), y0=float(params['Y0']),
-                    nu=0.25, mu=30e9
-                )
+            # Forward model via cached function
+            ue, un, uv = _cached_fwd(X_obs_f64, Y_obs_f64, params)
             
             # Ensure outputs are arrays
             ue = np.asarray(ue, dtype=float)
@@ -525,6 +452,26 @@ def simulated_annealing_optimization(u_los_obs, X_obs, Y_obs, incidence_angle, h
             print(f" Model {idx+1} ({model_list[idx]}):")
             for key, val in pd.items():
                 print(f"  {key:10s}: {val:8.4f}")
+
+    if not np.isfinite(best_energy):
+        # Every state SA visited was infeasible -- possible when no
+        # starting_params were supplied, since the fallback start is a random
+        # draw inside the boxes and roughly a quarter of the box violates the
+        # model prior for the UNE stack models.  Returning it would hand MCMC
+        # a -inf initial log-posterior; give the caller's own starting point
+        # back instead.
+        print("  SA WARNING: no feasible state found (best energy is not "
+              "finite); returning the supplied starting parameters.")
+        if flat_start:
+            if single_model_mode:
+                best_return = dict(flat_start)
+            else:
+                best_return = []
+                for idx, label in enumerate(labels):
+                    pre = label + '__'
+                    best_return.append({k[len(pre):]: v
+                                        for k, v in flat_start.items()
+                                        if k.startswith(pre)})
 
     return best_return, best_energy, energy_trace, temperature_trace
 

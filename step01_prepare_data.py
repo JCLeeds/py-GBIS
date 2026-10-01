@@ -9,9 +9,8 @@ Key Features:
 - Processing of multi-component displacement data (East, North, Up, Phase)
 - Conversion from Cartesian (E,N,U) to radar geometry (incidence, heading angles)
 - Export to compressed NumPy format for further analysis
-The tool is particularly useful for InSAR time series analysis where computational
-efficiency requires reduced data volume while maintaining high resolution in areas
-of interest (e.g., around active deformation sources).
+
+The clip extent is set to 3 times the radius of the selected high-resolution area to ensure sufficient context for analysis.
 Usage:
     python prep_data.py input.tif input_e.tif input_n.tif input_u.tif [options]
 Example:
@@ -69,7 +68,7 @@ class InteractiveSelector:
         self.fig, self.ax = plt.subplots(figsize=(12, 8))
         
         # Display the data
-        im = self.ax.imshow(data, extent=extent, cmap='viridis', aspect='auto')
+        im = self.ax.imshow(data, extent=extent, cmap='RdBu_r', aspect='auto')
         self.ax.set_xlabel('Longitude')
         self.ax.set_ylabel('Latitude')
         self.ax.set_title('Click to select center point, then adjust radius with mouse wheel')
@@ -466,10 +465,10 @@ def main():
     # Plot the downsampled results
     fig, ax = plt.subplots(figsize=(10, 8))
     
-    scatter = ax.scatter(lons, lats, c=displacement, cmap='viridis', s=1, alpha=0.7)
+    scatter = ax.scatter(lons, lats, c=displacement, cmap='RdBu_r', s=15, alpha=0.7)
     ax.set_xlabel('Longitude')
     ax.set_ylabel('Latitude')
-    ax.set_title('Downsampled Results')
+    ax.set_title(f'Downsampled Results  (n={len(displacement):,})')
     plt.colorbar(scatter, ax=ax, label='Displacement')
     
     plt.tight_layout()
@@ -560,6 +559,10 @@ def main():
     print(f"Processing complete. Data shape: {displacement.shape}")
     print(f"High-resolution pixels: {np.sum(mask)}")
     print(f"Low-resolution pixels: {np.sum(~mask)}")
+
+
+
+
 
 if __name__ == "__main__":
     main()

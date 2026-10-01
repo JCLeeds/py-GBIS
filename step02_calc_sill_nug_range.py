@@ -143,7 +143,11 @@ def calculate_variogram_memory_efficient(x, y, values, max_lag=None, n_lags=50, 
     return lag_centers, variogram
 
 
-def covairance_calculator(datapath, referencePoint):
+def covairance_calculator(datapath, referencePoint, mask_mode='exclude'):
+    """
+    mask_mode : 'exclude'  — polygon marks points to remove; variogram uses the remainder.
+                'include'  — polygon marks the region of interest; variogram uses only those points.
+    """
 
     def on_mouse_click(event):
         """Handle mouse click events"""
@@ -168,7 +172,7 @@ def covairance_calculator(datapath, referencePoint):
     
     def exponential_variogram(h, nugget, sill, range_param):
         """Exponential variogram model"""
-        return nugget + (sill - nugget) * (1 - np.exp(-3 * h / range_param))
+        return nugget + (sill - nugget) * (1 - np.exp(-h / range_param))
 
     def fit_variogram(lag_centers, variogram):
         """Fit exponential variogram model"""
@@ -202,32 +206,45 @@ def covairance_calculator(datapath, referencePoint):
 
     def update_plots():
         """Update plots with current mask"""
-        nonlocal polygon_selector
-        
-        # Clear previous plots
-        fig.clear()
-        
-        # Create subplots
-        ax1 = fig.add_subplot(121)
-        ax2 = fig.add_subplot(122)
+        nonlocal polygon_selector, _cbar
 
-        
-        # Plot masked data - now mask_vis=True means excluded, mask_vis=False means selected
-        scatter = ax1.scatter(X_vis[~mask_vis], Y_vis[~mask_vis], c=u_los_vis[~mask_vis], s=1, cmap='RdBu_r', vmin=np.min(u_los_vis), vmax=np.max(u_los_vis))
-        ax1.scatter(X_vis[mask_vis], Y_vis[mask_vis], c='gray', s=0.5, alpha=0.3)
+        # Remove colorbar BEFORE clearing axes — colorbar.remove() needs ax1
+        # to still have a valid position reference.
+        if _cbar is not None:
+            _cbar.remove()
+            _cbar = None
+
+        ax1.cla()
+        ax2.cla()
+
+        # Decide which vis-points are "active" (used for variogram) vs "background"
+        if mask_mode == 'include':
+            active_vis  = mask_vis      # inside polygon → coloured, used for variogram
+            passive_vis = ~mask_vis     # outside polygon → greyed out
+            mode_label  = 'In polygon'
+        else:  # 'exclude'
+            active_vis  = ~mask_vis     # outside polygon → coloured, used for variogram
+            passive_vis = mask_vis      # inside polygon → greyed out
+            mode_label  = 'Selected'
+
+        _vmin = np.nanmin(u_los_vis)
+        _vmax = np.nanmax(u_los_vis)
+        scatter = ax1.scatter(X_vis[active_vis], Y_vis[active_vis],
+                              c=u_los_vis[active_vis], s=1, cmap='RdBu_r',
+                              vmin=_vmin, vmax=_vmax)
+        ax1.scatter(X_vis[passive_vis], Y_vis[passive_vis], c='gray', s=0.5, alpha=0.3)
         ax1.set_xlabel('X (m)')
         ax1.set_ylabel('Y (m)')
-        ax1.set_title(f'Data (Selected: {np.sum(~mask_vis)} points)\nRight-click to reset')  # Fixed count
-        plt.colorbar(scatter, ax=ax1, label='Phase')
-        
-        # Calculate and plot variogram for masked data
-        n_selected = np.sum(~mask_vis)
+        ax1.set_title(f'Data ({mode_label}: {np.sum(active_vis)} points)\nRight-click to reset')
+        _cbar = fig.colorbar(scatter, ax=ax1, label='Phase')
+
+        # Calculate variogram for the active subset
+        n_selected = np.sum(active_vis)
         if n_selected > 10:
-            print(f"Calculating variogram for {n_selected} selected points (this may take a moment for large datasets)...")
-            
-            # Map visualization mask back to full dataset
+            print(f"Calculating variogram for {n_selected} active points...")
+
             full_mask = np.zeros(len(X_obs), dtype=bool)
-            selected_vis_indices = vis_to_full_map[~mask_vis]
+            selected_vis_indices = vis_to_full_map[active_vis]
             full_mask[selected_vis_indices] = True
             
             n_full_selected = np.sum(full_mask)
@@ -275,8 +292,11 @@ def covairance_calculator(datapath, referencePoint):
                         transform=ax2.transAxes, ha='center', va='center',
                         bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.5))
         else:
-            print("Not enough points selected for variogram calculation.")
-            ax2.text(0.5, 0.5, 'Select more points\nfor variogram', 
+            print("Not enough active points for variogram calculation.")
+            prompt = ('Draw a polygon to select\npoints for variogram'
+                      if mask_mode == 'include' else
+                      'Select more points\nfor variogram')
+            ax2.text(0.5, 0.5, prompt,
                     transform=ax2.transAxes, ha='center', va='center',
                     bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.5))
         
@@ -299,28 +319,57 @@ def covairance_calculator(datapath, referencePoint):
     # Load data from .npy file
     print("Loading data...")
     data = np.load(datapath, allow_pickle=True)
-    
+
     # Extract data from the loaded object
     data_dict = data.item()
     # print(data_dict.keys())
-    u_los_obs = np.array(data_dict['Phase']).flatten()
-    u_los_obs = -u_los_obs*(0.0555/(4*np.pi))
-    
-    Lon = np.array(data_dict['Lon'])
-    Lat = np.array(data_dict['Lat'])
-    
+    Phase_raw = np.asarray(data_dict['Phase'])
+    Inc_raw = np.asarray(data_dict['Inc'])
+    Heading_raw = np.asarray(data_dict['Heading'])
+    Lon_raw = np.asarray(data_dict['Lon'])
+    Lat_raw = np.asarray(data_dict['Lat'])
+
+    if Lon_raw.ndim == 1 and Lat_raw.ndim == 1 and Lon_raw.size != Phase_raw.size:
+        # Axis-vector format: Lon/Lat are 1-D coordinate axes (e.g. length = image
+        # width/height) rather than a full per-pixel grid -- seen in the divider
+        # dataset's raw *.geo.npy (as opposed to the pre-gridded format used by every
+        # other dataset in this codebase, where Lon/Lat are already full 2-D arrays
+        # matching Phase's shape). Build the 2-D grid explicitly before flattening so
+        # each pixel's Phase/Inc/Heading pairs with the correct Lon/Lat -- rows=Lat,
+        # cols=Lon, matching Phase's own (n_lat, n_lon) shape.
+        print(f"Lon/Lat are 1-D axis vectors (lengths {Lon_raw.size}, {Lat_raw.size}) "
+              f"vs. Phase shape {Phase_raw.shape} -- expanding to a 2-D grid.")
+        Lat2d, Lon2d = np.meshgrid(Lat_raw, Lon_raw, indexing='ij')
+    else:
+        Lat2d, Lon2d = Lat_raw, Lon_raw
+
+    u_los_obs = Phase_raw.flatten()
+    # u_los_obs = -u_los_obs*(0.0555/(4*np.pi))
+
+    Lon = Lon2d.flatten()
+    Lat = Lat2d.flatten()
+
     print(f"Original data size: {len(u_los_obs)} points")
-    
+
     # Convert coordinates
     print("Converting coordinates...")
     X_obs, Y_obs = convert_lat_long_2_xy(Lat, Lon, referencePoint[0], referencePoint[1])
     print(f"Converted Lon/Lat to X/Y with reference point {referencePoint}")
     print(f"X_obs range: {X_obs.min():.3f} to {X_obs.max():.3f}")
     print(f"Y_obs range: {Y_obs.min():.3f} to {Y_obs.max():.3f}")
-    
-    incidence_angle = np.array(data_dict['Inc'])
-    heading = np.array(data_dict['Heading'])
-    
+
+    incidence_angle = np.rad2deg(Inc_raw).flatten()
+    heading = np.rad2deg(Heading_raw).flatten()
+
+    for _name, _arr in (('u_los_obs', u_los_obs), ('Lon', Lon), ('Lat', Lat),
+                        ('incidence_angle', incidence_angle), ('heading', heading)):
+        if _arr.size != u_los_obs.size:
+            raise ValueError(
+                f"Shape mismatch after loading '{datapath}': {_name} has "
+                f"{_arr.size} elements, Phase has {u_los_obs.size}. Check whether "
+                f"Lon/Lat/Inc/Heading use a different grid convention than expected."
+            )
+
     print(f"Loaded data shapes:")
     print(f"  u_los_obs: {u_los_obs.shape}")
     print(f"  X_obs: {X_obs.shape}")
@@ -343,67 +392,31 @@ def covairance_calculator(datapath, referencePoint):
         u_los_vis = u_los_obs
         vis_to_full_map = np.arange(len(X_obs))
     
-    mask_vis = np.zeros(len(X_vis), dtype=bool)  # Changed from ones to zeros - False means selected
+    mask_vis = np.zeros(len(X_vis), dtype=bool)  # False = selected/kept
     polygon_selector = None
-    fig = None
+    _cbar = None  # shared colorbar reference — replaced (not multiplied) on each update
 
-    # ... rest of the functions remain the same ...
-
-    # Create initial plot
-    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(15, 6))
-
-    # Initial scatter plot - show all data initially
-    scatter = ax1.scatter(X_vis, Y_vis, c=u_los_vis, s=1, cmap='RdBu_r')
-    ax1.set_xlabel('X (m)')
-    ax1.set_ylabel('Y (m)')
-    ax1.set_title('Select polygon to mask data\nRight-click to reset')
-    plt.colorbar(scatter, ax=ax1, label='Displacement LOS (m) (positive towards satellite)')
-
-    # Initialize polygon selector
-    polygon_selector = PolygonSelector(ax1, onselect, useblit=True)
-
-    # Connect mouse click event
-    fig.canvas.mpl_connect('button_press_event', on_mouse_click)
-
-    # Calculate initial variogram
-    print("Calculating initial variogram...")
-    lag_centers, variogram = calculate_variogram_memory_efficient(X_obs, Y_obs, u_los_obs)
-    ax2.scatter(lag_centers, variogram, alpha=0.7, label='Empirical (All data)')
-    ax2.set_xlabel('Distance (m)')
-    ax2.set_ylabel('Semivariance')
-    ax2.set_title('Variogram')
-    ax2.legend()
-    ax2.grid(True, alpha=0.3)
-
-    plt.tight_layout()
-    plt.show()
-
-    print("Instructions:")
-    print("1. Click points on the left plot to create a polygon")
-    print("2. Complete the polygon to mask the data")
-    print("3. Right-click anywhere to reset and draw a new polygon")
-    print("4. Variogram will be calculated and fitted for selected data")
-
-
-
-
-    # Create initial plot
+    # Create figure once; ax1 and ax2 live for the session
     fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(15, 6))
 
     # Initial scatter plot
-    scatter = ax1.scatter(X_vis, Y_vis, c=u_los_vis, s=1, cmap='RdBu_r')
+    _vmin = np.nanmin(u_los_vis)
+    _vmax = np.nanmax(u_los_vis)
+    scatter = ax1.scatter(X_vis, Y_vis, c=u_los_vis, s=1, cmap='RdBu_r',
+                          vmin=_vmin, vmax=_vmax)
     ax1.set_xlabel('X (m)')
     ax1.set_ylabel('Y (m)')
-    ax1.set_title('Select polygon to mask data\nRight-click to reset')
-    plt.colorbar(scatter, ax=ax1, label='Phase')
+    if mask_mode == 'include':
+        ax1.set_title('Draw polygon to select region for variogram\nRight-click to reset')
+    else:
+        ax1.set_title('Draw polygon to exclude region from variogram\nRight-click to reset')
+    _cbar = fig.colorbar(scatter, ax=ax1,
+                         label='Displacement LOS (m) (positive towards satellite)')
 
-    # Initialize polygon selector
     polygon_selector = PolygonSelector(ax1, onselect, useblit=True)
-
-    # Connect mouse click event
     fig.canvas.mpl_connect('button_press_event', on_mouse_click)
 
-    # Calculate initial variogram
+    # Initial variogram
     print("Calculating initial variogram...")
     lag_centers, variogram = calculate_variogram_memory_efficient(X_obs, Y_obs, u_los_obs)
     ax2.scatter(lag_centers, variogram, alpha=0.7, label='Empirical (All data)')
@@ -414,23 +427,32 @@ def covairance_calculator(datapath, referencePoint):
     ax2.grid(True, alpha=0.3)
 
     plt.tight_layout()
-    plt.show()
-
     print("Instructions:")
-    print("1. Click points on the left plot to create a polygon")
-    print("2. Complete the polygon to mask the data")
-    print("3. Right-click anywhere to reset and draw a new polygon")
-    print("4. Variogram will be calculated and fitted for selected data")
+    print("1. Left-click to draw polygon vertices on the left plot")
+    print("2. Complete the polygon to exclude those points")
+    print("3. Right-click anywhere to reset the selection")
+    print("4. Variogram is re-fitted for the remaining (unmasked) points")
+    plt.show()
 
 
 if __name__ == "__main__":
 
     ################################## EDIT to YOUR own DATA PATH #############################
-    datapath = '20230108_20230201.geo.unw_processed_clipped_full_resolution.npy'
+    # datapath = '/uolstore/Research/a/a285/homes/ee18jwc/code/py-GBIS/divider/19920424_19930305.diff.unw.geo.npy'
+    datapath = '/uolstore/Research/a/a285/homes/ee18jwc/code/py-GBIS/divider/19920424_19930305.diff.unw.geo.npy'
+   
     ###################################################################
+    # 'exclude' : polygon marks region to REMOVE; variogram uses points outside the polygon
+    # 'include' : polygon marks region of INTEREST; variogram uses only points inside the polygon
+    MASK_MODE = 'include'
+
     data = np.load(datapath, allow_pickle=True)
     data_dict = data.item()
+
     print(data_dict.keys())
-    referencePoint = [float(data_dict['center_lat']),float(data_dict['center_lon'])]
+    # referencePoint = [ 37.27246,-116.35976] #junction
+    # referencePoint = [37.02068,-115.98791] # divider
+    # referencePoint = [float(data_dict['center_lat']), float(data_dict['center_lon'])]
+    referencePoint = [37.02068, -115.98791]  # divider (lat, lon)
     print(referencePoint)
-    covairance_calculator(datapath,referencePoint)
+    covairance_calculator(datapath, referencePoint, mask_mode=MASK_MODE)
